@@ -14,34 +14,34 @@
 
 namespace {
 
-bool isNumeric(int32_t t) { return t == PY_INT || t == PY_FLOAT || t == PY_BOOL; }
+  bool isNumeric(int32_t t) { return t == PY_INT || t == PY_FLOAT || t == PY_BOOL; }
 
-bool wantFloat(PyValue a, PyValue b) {
-  return a.tag == PY_FLOAT || b.tag == PY_FLOAT;
-}
+  bool wantFloat(PyValue a, PyValue b) {
+    return a.tag == PY_FLOAT || b.tag == PY_FLOAT;
+  }
 
-double toDouble(PyValue v) {
-  return v.tag == PY_FLOAT ? v.as.f : static_cast<double>(v.as.i);
-}
+  double toDouble(PyValue v) {
+    return v.tag == PY_FLOAT ? v.as.f : static_cast<double>(v.as.i);
+  }
 
-[[noreturn]] void badOperands(const char *op, PyValue a, PyValue b) {
-  static thread_local char buf[192];
-  std::snprintf(buf, sizeof(buf), "不支持的操作数类型: %s 用于 '%s' 和 '%s'",
-                op, py_tag_name(a.tag), py_tag_name(b.tag));
-  py_runtime_error(buf);
-}
+  [[noreturn]] void badOperands(const char *op, PyValue a, PyValue b) {
+    static thread_local char buf[192];
+    std::snprintf(buf, sizeof(buf), "不支持的操作数类型: %s 用于 '%s' 和 '%s'",
+                  op, py_tag_name(a.tag), py_tag_name(b.tag));
+    py_runtime_error(buf);
+  }
 
-void needNumeric(const char *op, PyValue a, PyValue b) {
-  if (!isNumeric(a.tag) || !isNumeric(b.tag)) badOperands(op, a, b);
-}
+  void needNumeric(const char *op, PyValue a, PyValue b) {
+    if (!isNumeric(a.tag) || !isNumeric(b.tag)) badOperands(op, a, b);
+  }
 
-// 比较前先检查可比性。数值之间可比;类型不同一律不可比(与 Python 一致,
-// 除了 == / != 会返回 False / True 而不是报错)。
-void needComparable(const char *op, PyValue a, PyValue b) {
-  if (!isNumeric(a.tag) || !isNumeric(b.tag)) badOperands(op, a, b);
-}
+  // 比较前先检查可比性。数值之间可比;类型不同一律不可比(与 Python 一致,
+  // 除了 == / != 会返回 False / True 而不是报错)。
+  void needComparable(const char *op, PyValue a, PyValue b) {
+    if (!isNumeric(a.tag) || !isNumeric(b.tag)) badOperands(op, a, b);
+  }
 
-PyValue boolOf(bool b) { return py_bool(b); }
+  PyValue boolOf(bool b) { return py_bool(b); }
 
 }  // namespace
 
