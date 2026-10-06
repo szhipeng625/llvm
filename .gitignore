@@ -1,0 +1,25 @@
+# 构建产物
+/build/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# 以防万一:任何 WireGuard / 通用密钥配置都不该进仓库
+*.conf
+*.key
+*.pem
+*.p12
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store

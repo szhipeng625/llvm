@@ -1,0 +1,4 @@
+x = input(float)
+name = input(str)
+print(x, name)
+print(x * 2)

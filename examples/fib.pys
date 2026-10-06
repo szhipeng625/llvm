@@ -1,0 +1,17 @@
+# 递归、条件分支、多返回值
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+# 返回两个值 —— 调用方用多目标赋值解包
+def minmax(a: int, b: int) -> int:
+    if a < b:
+        return a, b
+    return b, a
+
+n = 10
+print(fib(n))
+
+lo, hi = minmax(3, 7)
+print(lo, hi)

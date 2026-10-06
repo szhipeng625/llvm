@@ -1,0 +1,9 @@
+def minmax(a: int, b: int) -> int:
+    if a < b:
+        return a, b
+    return b, a
+
+lo, hi = minmax(3, 7)
+print(lo, hi)
+lo, hi = minmax(9, 4)
+print(lo, hi)
