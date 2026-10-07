@@ -137,7 +137,8 @@ StmtPtr Parser::parseSimpleStmt() {
   const int line = cur().line;
   const int col = cur().col;
 
-  auto first = parseExprList();
+  bool firstEndedWithComma = false;
+  auto first = parseExprList(&firstEndedWithComma);
 
   // 复合赋值:a += b。必须先判断,否则 `=` 会被当成普通赋值的开始。
   if (isAugAssignPair(cur().kind, peek(1).kind)) {
@@ -158,13 +159,15 @@ StmtPtr Parser::parseSimpleStmt() {
   // 赋值。注意单目标和多目标走同一条路径 —— `a, b = ...` 的 targets 有多个,
   // `a = ...` 只有一个。IRGen 那边统一按多值解包处理。
   if (accept(Tok::Assign)) {
-    auto rhs = parseExprList();
+    bool trailingComma = false;
+    auto rhs = parseExprList(&trailingComma);
     expect(Tok::Newline, "行尾");
     auto s = std::make_unique<Assign>();
     s->line = line;
     s->col = col;
     for (auto &e : first) s->targets.push_back(std::move(e));
-    s->value = wrapList(std::move(rhs), line, col);
+    // `x = 1,` 在 Python 里是单元素元组,靠的就是这个尾随逗号
+    s->value = wrapList(std::move(rhs), line, col, trailingComma);
     return s;
   }
 
@@ -172,7 +175,7 @@ StmtPtr Parser::parseSimpleStmt() {
   auto s = std::make_unique<ExprStmt>();
   s->line = line;
   s->col = col;
-  s->expr = wrapList(std::move(first), line, col);
+  s->expr = wrapList(std::move(first), line, col, firstEndedWithComma);
   return s;
 }
 
@@ -274,8 +277,10 @@ StmtPtr Parser::parseReturn() {
 
   expect(Tok::KwReturn, "'return'");
   if (!at(Tok::Newline)) {
-    auto items = parseExprList();
-    s->value = wrapList(std::move(items), kw.line, kw.col);
+    bool trailingComma = false;
+    auto items = parseExprList(&trailingComma);
+    // `return 1,` 返回的是单元素元组
+    s->value = wrapList(std::move(items), kw.line, kw.col, trailingComma);
   }
   expect(Tok::Newline, "行尾");
   return s;
@@ -285,17 +290,20 @@ StmtPtr Parser::parseReturn() {
 // 表达式
 // ---------------------------------------------------------------------------
 
-std::vector<ExprPtr> Parser::parseExprList() {
+std::vector<ExprPtr> Parser::parseExprList(bool *outEndedWithComma) {
   std::vector<ExprPtr> items;
+  bool endedWithComma = false;
   items.push_back(parseExpr());
   while (accept(Tok::Comma)) {
     // 允许尾随逗号,以及 `a, b = ...` 里逗号后直接跟 '=' 的情况
     if (at(Tok::Newline) || at(Tok::Assign) || at(Tok::RParen) ||
         at(Tok::RBracket) || at(Tok::RBrace) || at(Tok::Colon)) {
+      endedWithComma = true;   // 这个逗号本身有意义,见 wrapList
       break;
     }
     items.push_back(parseExpr());
   }
+  if (outEndedWithComma) *outEndedWithComma = endedWithComma;
   return items;
 }
 
@@ -574,10 +582,11 @@ ExprPtr Parser::parseAtom() {
         e->col = t.col;
         return e;
       }
-      auto items = parseExprList();
+      bool trailingComma = false;
+      auto items = parseExprList(&trailingComma);
       expect(Tok::RParen, "')'");
-      // (a) 就是 a;(a, b) 才是元组 —— wrapList 负责区分
-      return wrapList(std::move(items), t.line, t.col);
+      // (a) 就是 a;(a, b) 和 (a,) 都是元组 —— wrapList 靠尾随逗号区分
+      return wrapList(std::move(items), t.line, t.col, trailingComma);
     }
     case Tok::LBracket: {
       ++pos_;
@@ -686,8 +695,11 @@ TypeName Parser::parseTypeAnnotation() {
   }
 }
 
-ExprPtr Parser::wrapList(std::vector<ExprPtr> items, int line, int col) {
-  if (items.size() == 1) return std::move(items[0]);
+ExprPtr Parser::wrapList(std::vector<ExprPtr> items, int line, int col,
+                         bool endedWithComma) {
+  // 单元素且**不以逗号收尾**才是"括号只是分组"的情形:(1) 就是 1。
+  // (1,) 必须留成元组 —— 否则 `print((1,))` 会打 1,而 Python 打 (1,)。
+  if (items.size() == 1 && !endedWithComma) return std::move(items[0]);
   auto t = std::make_unique<TupleLit>();
   t->line = line;
   t->col = col;

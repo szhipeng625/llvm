@@ -10,9 +10,13 @@
 // 由 pylitec 编译 arith.pys 生成(符号名规则:pylite_<模块名>_<函数名>)
 extern "C" void pylite_arith_main();
 
+// 横幅刻意用 ASCII:这个程序的 stdout 要跟 arith.expected 逐字节比对,而
+// tests/compare_output.cmake 在 Windows 上只能比 ASCII(execute_process 会用
+// 当前代码页重新解码子进程输出,file(READ) 却不会 —— 中文横幅在两边会变成
+// 不同的字节)。注释仍然用中文,受影响的只有程序真正打出来的字符。
 int main() {
-  std::printf("--- 调用 PyLite 编译产物 ---\n");
+  std::printf("--- calling PyLite object ---\n");
   pylite_arith_main();
-  std::printf("--- 返回 ---\n");
+  std::printf("--- done ---\n");
   return 0;
 }

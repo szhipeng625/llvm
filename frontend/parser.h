@@ -45,7 +45,9 @@ class Parser {
   StmtPtr parseReturn();
 
   // --- 表达式 ---
-  std::vector<ExprPtr> parseExprList();    // 逗号分隔
+  // 逗号分隔。outEndedWithComma(可为 nullptr)报告列表是否**以逗号收尾** ——
+  // 这个信息不能丢:`(1,)` 是单元素元组,而 `(1)` 就是 `1`,区别全在尾随逗号上。
+  std::vector<ExprPtr> parseExprList(bool *outEndedWithComma = nullptr);
   ExprPtr parseExpr();
   ExprPtr parseOr();
   ExprPtr parseAnd();
@@ -62,9 +64,11 @@ class Parser {
   ExprPtr parseSubscriptOf(ExprPtr obj);
 
   // 把逗号分隔的表达式列表包装成单个节点:
-  // 只有一个元素就原样返回,多个元素包成 TupleLit。
-  // `a, b = b, a` 的右侧走这条路径。
-  ExprPtr wrapList(std::vector<ExprPtr> items, int line, int col);
+  // 多个元素包成 TupleLit;只有一个元素时**只有列表以逗号收尾**才包 ——
+  // `(1,)` / `x = 1,` / `return 1,` 在 Python 里都是单元素元组。
+  // `a, b = b, a` 的右侧也走这条路径。
+  ExprPtr wrapList(std::vector<ExprPtr> items, int line, int col,
+                   bool endedWithComma = false);
 
   TypeName parseTypeAnnotation();          // int / float / bool / str
 

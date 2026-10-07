@@ -238,6 +238,30 @@ int main() {
     check(d && d->items.size() == 2, "字典字面量");
   }
   {
+    // (a,) 是单元素元组,(a) 就是 a —— 区别全在尾随逗号上。
+    // 曾经解析器把尾随逗号丢掉了,于是 print((1,)) 打出 1(应为 (1,))。
+    auto m = parse("(1,)\n");
+    auto *t = dynamic_cast<const TupleLit *>(exprOf(stmt(*m, 0)));
+    check(t && t->items.size() == 1, "(1,) 解析成单元素元组");
+
+    auto m2 = parse("(1)\n");
+    check(dynamic_cast<const IntLit *>(exprOf(stmt(*m2, 0))) != nullptr,
+          "(1) 就是整数 1,不是元组");
+
+    auto m3 = parse("x = 1,\n");
+    auto *as = dynamic_cast<const Assign *>(stmt(*m3, 0));
+    auto *tv = as ? dynamic_cast<const TupleLit *>(as->value.get()) : nullptr;
+    check(tv && tv->items.size() == 1, "x = 1, 右侧是单元素元组");
+
+    auto m4 = parse("def f():\n    return 1,\n");
+    auto *fd = dynamic_cast<const FuncDef *>(stmt(*m4, 0));
+    auto *ret = fd && !fd->body.empty()
+                    ? dynamic_cast<const Return *>(fd->body[0].get())
+                    : nullptr;
+    check(ret && dynamic_cast<const TupleLit *>(ret->value.get()) != nullptr,
+          "return 1, 返回的是单元素元组");
+  }
+  {
     auto m = parse("y = s[1:3]\n");
     auto *as = dynamic_cast<const Assign *>(stmt(*m, 0));
     auto *sl = as ? dynamic_cast<const SliceExpr *>(as->value.get()) : nullptr;
