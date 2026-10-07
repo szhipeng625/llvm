@@ -1,0 +1,13 @@
+# 回归用例:循环体里**不能**出现 alloca。
+#
+# LLVM 只把函数入口块里的 alloca 当静态栈槽(AllocaInst::isStaticAlloca),
+# 循环体里的 alloca 每次执行都会真的调整栈指针。曾经 `total = total + i`
+# 这一行就会在循环体里生成一个存放 py_add 结果的槽位,于是:
+#   50000 次正常,200000 次栈溢出崩溃。
+# 现在所有槽位都由 Abi::allocEntry 放进入口块。
+#
+# 迭代次数刻意取 20 万 —— 比默认 1MB 栈能撑住的量级更大,一旦回归必然失败。
+total = 0
+for i in range(200000):
+    total = total + i
+print(total)

@@ -52,9 +52,27 @@ class IRGen {
   llvm::Value *genUnaryOp(const UnaryOp *e);
   llvm::Value *genCall(const Call *e);
   llvm::Value *genPrint(const Call *e);                // print(...) 内建
+  llvm::Value *genLen(const Call *e);                  // len(...) 内建
+  llvm::Value *genGcCollect(const Call *e);            // gc_collect() 内建
+  llvm::Value *genMethodCall(const Call *e, const Attribute *attr);  // obj.m(...)
   llvm::Value *genInput(const InputExpr *e);           // input(int, int) 特殊形式
-  llvm::Value *genListLit(const ListLit *e);           // Stage 6 前先报错
+  llvm::Value *genListLit(const ListLit *e);
+  llvm::Value *genDictLit(const DictLit *e);
   llvm::Value *genTupleLit(const TupleLit *e);
+  llvm::Value *genSubscript(const Subscript *e);
+  llvm::Value *genSlice(const SliceExpr *e);
+
+  // 把一组表达式依次求值,塞进一块连续的 %PyValue 数组,返回数组指针。
+  // genTupleLit / genListLit / genDictLit / genPrint / 方法调用共用。
+  //
+  // 用一个**数组**而不是逐个传参,是因为数组是内存布局,不受
+  // "聚合体不按值跨 ABI 边界"那条限制(见 docs/llvm-notes.md 第 2 节)。
+  // 元素个数为 0 时返回空指针,运行时不读它。
+  llvm::Value *evalToArray(const std::vector<ExprPtr> &items, const llvm::Twine &name);
+  void storeElement(llvm::Value *array, size_t i, llvm::Value *slot);
+
+  // 一个装着 None 的槽位。切片省略边界时用它当"没给"的哨兵。
+  llvm::Value *noneSlot();
 
   // --- 语句 ---
   void genStmt(const Stmt *s);
@@ -64,6 +82,7 @@ class IRGen {
   void genWhile(const While *s);
   void genFor(const For *s);
   void genForRange(const For *s, const RangeExpr *r);
+  void genForIterable(const For *s);   // 遍历 list / str / dict
   void genReturn(const Return *s);
   void genBlock(const std::vector<StmtPtr> &body);
 

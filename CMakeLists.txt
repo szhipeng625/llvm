@@ -41,10 +41,14 @@ add_compile_options(${LLVM_DEFINITIONS_LIST})
 # 一旦出现第一个 dllexport,后续符号就不再自动导出,反而会漏掉一批。
 add_library(pylite_runtime SHARED
   runtime/error.cpp
-  runtime/arena.cpp
+  runtime/gc.cpp
   runtime/arith.cpp
   runtime/string.cpp
   runtime/tuple.cpp
+  runtime/list.cpp
+  runtime/dict.cpp
+  runtime/index.cpp
+  runtime/method.cpp
   runtime/io.cpp
 )
 target_include_directories(pylite_runtime PUBLIC
@@ -102,6 +106,15 @@ target_link_libraries(pylitec PRIVATE pylite_irgen)
 add_executable(abi_test tests/abi_test.cpp)
 target_link_libraries(abi_test PRIVATE pylite_runtime)
 
+# 运行时语义的直接测试(不经过 IRGen)。放在这一层是为了让 e2e 失败时
+# 能立刻排除"运行时算错"这一整类原因。
+add_executable(runtime_test tests/runtime_test.cpp)
+target_link_libraries(runtime_test PRIVATE pylite_runtime)
+
+# GC 专项测试:守恒律、真的回收了、不误回收、环。
+add_executable(gc_test tests/gc_test.cpp)
+target_link_libraries(gc_test PRIVATE pylite_runtime)
+
 add_executable(jit_spike tests/jit_spike.cpp)
 target_include_directories(jit_spike PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(jit_spike PRIVATE LLVM pylite_runtime)
@@ -120,6 +133,8 @@ enable_testing()
 add_test(NAME abi_test COMMAND abi_test)
 add_test(NAME jit_spike COMMAND jit_spike)
 add_test(NAME frontend_test COMMAND frontend_test)
+add_test(NAME runtime_test COMMAND runtime_test)
+add_test(NAME gc_test COMMAND gc_test)
 
 # examples/ 下的每个示例都必须能被成功解析(退出码 0)。
 # 这是最轻量的检查:源码进、AST 出,覆盖前端全链路。
@@ -137,17 +152,47 @@ endforeach()
 # IR 验证通过、编译成功、链接成功,只有真正运行才暴露出来。
 set(E2E_CASES
   arith_ops
+  containers
+  dicts
   fib
   for_step
+  gc_stress
   if_else
+  inplace_add
   input_types
+  lists
   logic
+  long_loop
   loop_sum
   multiassign
   range_print
+  slices
+  strings
   unpack_call
   while_ctl
 )
+
+# 手写 C++ 链接 pylitec 产物的集成测试。tests/linktest/ 一直都在,但之前只有
+# 手工步骤;接进 CTest 之后,项目的核心诉求 —— "把 PyLite 编译进 C++ 程序" ——
+# 每次构建都会被真正验证一次。
+set(LINKTEST_OBJ ${CMAKE_CURRENT_BINARY_DIR}/linktest/arith.o)
+add_custom_command(
+  OUTPUT ${LINKTEST_OBJ}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/linktest
+  COMMAND pylitec ${CMAKE_CURRENT_SOURCE_DIR}/tests/linktest/arith.pys
+          -o ${LINKTEST_OBJ}
+  DEPENDS pylitec ${CMAKE_CURRENT_SOURCE_DIR}/tests/linktest/arith.pys
+  COMMENT "pylitec linktest/arith.pys")
+
+add_executable(linktest tests/linktest/main.cpp ${LINKTEST_OBJ})
+target_link_libraries(linktest PRIVATE pylite_runtime)
+
+add_test(NAME linktest
+         COMMAND ${CMAKE_COMMAND}
+                 -DEXE=$<TARGET_FILE:linktest>
+                 -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/tests/linktest/arith.expected
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_output.cmake)
+
 
 foreach(t ${E2E_CASES})
   set(pys ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/${t}.pys)
@@ -183,4 +228,17 @@ foreach(t ${E2E_CASES})
                    -DEXPECTED=${exp}
                    ${inputArg}
                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_output.cmake)
+
+  # 同一份程序再跑一轮"每次分配都回收"。默认配置下这些用例只分配几 KB,
+  # 离任何回收阈值都差着数量级 —— 也就是说 GC 的回收路径**根本没被走到**,
+  # 全绿说明不了任何问题。加上这一轮之后,丢根与误回收会立刻暴露,
+  # 而输出必须与默认配置逐字节相同(这本身就证明"回收不影响可观测行为")。
+  add_test(NAME e2e_${t}_gc
+           COMMAND ${CMAKE_COMMAND}
+                   -DEXE=$<TARGET_FILE:e2e_${t}>
+                   -DEXPECTED=${exp}
+                   ${inputArg}
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_output.cmake)
+  set_tests_properties(e2e_${t}_gc PROPERTIES
+                       ENVIRONMENT "PYLITE_GC_STRESS=1")
 endforeach()

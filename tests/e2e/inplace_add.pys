@@ -1,0 +1,18 @@
+xs = [1, 2]
+alias = xs
+xs += [3]
+print(xs, alias)
+
+ys = [1, 2]
+alias2 = ys
+ys = ys + [3]
+print(ys, alias2)
+
+s = "ab"
+t = s
+s += "cd"
+print(s, t)
+
+zs = [1]
+zs += zs
+print(zs)

@@ -1,0 +1,18 @@
+d = {"a": 1, "b": 2}
+print(d)
+print(d["a"], len(d))
+
+d["c"] = 3
+print(d)
+
+print(d.get("a"), d.get("zz"), d.get("zz", -1))
+print(d.keys(), d.values(), d.items())
+
+d["a"] = 10
+print(d)
+
+for k in d:
+    print(k, d[k])
+
+print(d.pop("b"), d)
+print({})

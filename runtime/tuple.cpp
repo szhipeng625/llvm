@@ -20,7 +20,11 @@ PyTuple *asTuple(const PyValue *v) { return static_cast<PyTuple *>(v->as.ptr); }
 }  // namespace
 
 extern "C" PyValue py_tuple_new(PyValue *elems, int64_t n) {
-  auto *t = static_cast<PyTuple *>(py_alloc(sizeof(int64_t) + sizeof(PyValue) * static_cast<size_t>(n)));
+  // ⚠️ 单元格从偏移 8 开始:PyTuple 是 {int64_t len; PyValue items[];},
+  // 从 0 开始会把 len 当成 tag、把 items[0].tag 当成 payload,整条链错位 ——
+  // 那是真的会丢根,不是保守与否的问题。
+  auto *t = static_cast<PyTuple *>(py_gc_alloc_values(
+      sizeof(int64_t) + sizeof(PyValue) * static_cast<size_t>(n), 8));
   t->len = n;
   for (int64_t i = 0; i < n; ++i) t->items[i] = elems[i];
   return py_ptr(PY_TUPLE, t);
@@ -37,8 +41,14 @@ extern "C" int64_t py_tuple_len(const PyValue *v) {
 
 extern "C" PyValue py_tuple_get(const PyValue *v, int64_t i) {
   PyTuple *t = asTuple(v);
+  // 负索引从末尾数,与列表/字符串一致(Python 语义)。
+  // 内部的 repr 打印总是传非负下标,不受影响。
+  if (i < 0) i += t->len;
   if (i < 0 || i >= t->len) {
-    py_runtime_error("元组下标越界");
+    static thread_local char buf[128];
+    std::snprintf(buf, sizeof(buf), "元组下标越界: %lld(长度 %lld)",
+                  static_cast<long long>(i), static_cast<long long>(t->len));
+    py_runtime_error(buf);
   }
   return t->items[i];
 }

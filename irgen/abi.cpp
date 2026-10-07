@@ -2,8 +2,10 @@
 
 #include "pylite/value.h"  // PY_INT 等 tag 常量,保证与 C++ 侧同源
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/Support/ErrorHandling.h"  // report_fatal_error
 
 #include <bit>  // std::bit_cast
 
@@ -28,8 +30,37 @@ Abi::Abi(Module &M) : M_(M), Ctx_(M.getContext()) {
   sretAttr_ = Attribute::getWithStructRetType(Ctx_, valueTy_);
 }
 
+AllocaInst *Abi::allocEntry(IRBuilder<> &B, Type *ty, Value *count,
+                            const Twine &name) {
+  // ⚠️ 局部空间一律放在函数的**入口块**,这是正确性要求而不是优化。
+  //
+  // LLVM 只把入口块里的 alloca 当静态栈槽 —— AllocaInst::isStaticAlloca()
+  // 明确要求 "在入口块"，否则会被降低成**每次执行都真的调整栈指针**的动态分配。
+  // 于是循环体里只要生成过一个 alloca(比如 `total = total + i` 里那个存放
+  // py_add 结果的槽位),每次迭代都会吃掉一份栈空间,几十万次之后栈溢出。
+  //
+  // 实测:同一段 `for i in range(N): total = total + i`,
+  //   N = 50000   正常
+  //   N = 200000  崩溃(进程异常退出,没有任何输出)
+  //
+  // 放进入口块后,空间在函数序言里一次分配、循环里反复复用,不累积。
+  // 语义上也仍然正确:每次调用函数都会新建(循环里给槽位赋值不会串到下一轮,
+  // 因为每次使用前都会先写)。
+  BasicBlock *bb = B.GetInsertBlock();
+  Function *fn = bb ? bb->getParent() : nullptr;
+  if (fn && !fn->isDeclaration() && bb != &fn->getEntryBlock()) {
+    IRBuilder<> tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+    return tmp.CreateAlloca(ty, count, name);
+  }
+  return B.CreateAlloca(ty, count, name);
+}
+
 Value *Abi::newSlot(IRBuilder<> &B, const Twine &name) {
-  return B.CreateAlloca(valueTy_, nullptr, name);
+  return allocEntry(B, valueTy_, nullptr, name);
+}
+
+Value *Abi::newSlotArray(IRBuilder<> &B, int64_t count, const Twine &name) {
+  return allocEntry(B, valueTy_, B.getInt32(static_cast<uint32_t>(count)), name);
 }
 
 Value *Abi::packAggregate(IRBuilder<> &B, Value *tag, Value *payloadI64) {
@@ -89,79 +120,69 @@ Value *Abi::loadFloat(IRBuilder<> &B, Value *slot) {
 // ---------------------------------------------------------------------------
 // 运行时函数声明
 //
-// 三个 declare* 是"聚合体按引用 + sret"这条约定的唯一落地点。
+// 这些 declare* 是"聚合体按引用 + sret"这条约定的唯一落地点。
 // 注意每个函数只声明一次并缓存 —— 重复创建同名函数会让 LLVM 把后来的
-// 改名成 py_add.1,符号就找不到了。
+// 改名成 py_add.1,而 DLL 里没有这个符号,症状又是"链接通过、一执行就段错误"。
 // ---------------------------------------------------------------------------
 
-Function *Abi::declareBinRet(StringRef name) {
+Function *Abi::getOrDeclare(StringRef name, FunctionType *ft, bool hasSret) {
   auto it = cache_.find(name.str());
   if (it != cache_.end()) return it->second;
 
-  // void @name(ptr sret(%PyValue), ptr %a, ptr %b)
-  auto *ft = FunctionType::get(voidTy_, {ptrTy_, ptrTy_, ptrTy_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  f->addParamAttr(0, sretAttr_);
+  // Module 里可能已经有这个名字:例如某次 callPrint 先建了 py_print,
+  // 之后又有代码按另一条路径要它。把已有的收进 cache_,避免重复声明。
+  Function *f = M_.getFunction(name);
+  if (!f) {
+    f = Function::Create(ft, Function::ExternalLinkage, name, M_);
+  } else if (f->getFunctionType() != ft) {
+    // 同一个符号名被两种签名声明过。真跑起来会得到一个按错误签名降低的调用 ——
+    // 链接能过,执行时段错误,而且几乎不可能从崩溃点反推回这里。宁可现在就炸。
+    report_fatal_error(Twine("运行时函数 '") + name +
+                       "' 被以两种不同的签名声明过一次;"
+                       "每个符号名只能对应一种签名(见 irgen/abi.h 的 callN 说明)");
+  }
+
+  if (hasSret) f->addParamAttr(0, sretAttr_);
   cache_[name.str()] = f;
   return f;
+}
+
+Function *Abi::declareBinRet(StringRef name) {
+  // void @name(ptr sret(%PyValue), ptr %a, ptr %b)
+  return getOrDeclare(name,
+                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, ptrTy_}, false),
+                      /*hasSret=*/true);
 }
 
 Function *Abi::declareUnaryRet(StringRef name) {
-  auto it = cache_.find(name.str());
-  if (it != cache_.end()) return it->second;
-
   // void @name(ptr sret(%PyValue), ptr %a)
-  auto *ft = FunctionType::get(voidTy_, {ptrTy_, ptrTy_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  f->addParamAttr(0, sretAttr_);
-  cache_[name.str()] = f;
-  return f;
+  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_, ptrTy_}, false),
+                      /*hasSret=*/true);
 }
 
 Function *Abi::declareUnaryPred(StringRef name) {
-  auto it = cache_.find(name.str());
-  if (it != cache_.end()) return it->second;
-
   // i32 @name(ptr %a)  —— 谓词返回 i32 而非 i1,见 value.h
-  auto *ft = FunctionType::get(i32Ty_, {ptrTy_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  cache_[name.str()] = f;
-  return f;
+  return getOrDeclare(name, FunctionType::get(i32Ty_, {ptrTy_}, false),
+                      /*hasSret=*/false);
 }
 
 Function *Abi::declareUnaryI64(StringRef name) {
-  auto it = cache_.find(name.str());
-  if (it != cache_.end()) return it->second;
-
   // i64 @name(ptr %a)
-  auto *ft = FunctionType::get(i64Ty_, {ptrTy_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  cache_[name.str()] = f;
-  return f;
+  return getOrDeclare(name, FunctionType::get(i64Ty_, {ptrTy_}, false),
+                      /*hasSret=*/false);
 }
 
 Function *Abi::declareNullaryRet(StringRef name) {
-  auto it = cache_.find(name.str());
-  if (it != cache_.end()) return it->second;
-
   // void @name(ptr sret(%PyValue))
-  auto *ft = FunctionType::get(voidTy_, {ptrTy_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  f->addParamAttr(0, sretAttr_);
-  cache_[name.str()] = f;
-  return f;
+  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_}, false),
+                      /*hasSret=*/true);
 }
 
 Function *Abi::declarePtrI64Ret(StringRef name) {
-  auto it = cache_.find(name.str());
-  if (it != cache_.end()) return it->second;
-
   // void @name(ptr sret(%PyValue), ptr, i64)
-  auto *ft = FunctionType::get(voidTy_, {ptrTy_, ptrTy_, i64Ty_}, false);
-  auto *f = Function::Create(ft, Function::ExternalLinkage, name, M_);
-  f->addParamAttr(0, sretAttr_);
-  cache_[name.str()] = f;
-  return f;
+  return getOrDeclare(name,
+                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, i64Ty_}, false),
+                      /*hasSret=*/true);
 }
 
 Value *Abi::callBinary(IRBuilder<> &B, StringRef fn, Value *a, Value *b) {
@@ -204,10 +225,7 @@ Value *Abi::callPtrI64(IRBuilder<> &B, StringRef fn, Value *p, Value *i) {
 
 void Abi::callPrint(IRBuilder<> &B, Value *slotArray, int64_t n) {
   auto *ft = FunctionType::get(voidTy_, {ptrTy_, i64Ty_}, false);
-  Function *f = M_.getFunction("py_print");
-  if (!f) {
-    f = Function::Create(ft, Function::ExternalLinkage, "py_print", M_);
-  }
+  Function *f = getOrDeclare("py_print", ft, /*hasSret=*/false);
   B.CreateCall(f, {slotArray, ConstantInt::get(i64Ty_, n)});
 }
 
@@ -215,11 +233,37 @@ void Abi::callUnpack(IRBuilder<> &B, Value *tupleSlot, Value *outArray, int64_t 
   // void @py_unpack(ptr %tuple, ptr %out, i64 %n)
   // 三个参数都是普通标量/指针,不涉及聚合体按值传递
   auto *ft = FunctionType::get(voidTy_, {ptrTy_, ptrTy_, i64Ty_}, false);
-  Function *f = M_.getFunction("py_unpack");
-  if (!f) {
-    f = Function::Create(ft, Function::ExternalLinkage, "py_unpack", M_);
-  }
+  Function *f = getOrDeclare("py_unpack", ft, /*hasSret=*/false);
   B.CreateCall(f, {tupleSlot, outArray, ConstantInt::get(i64Ty_, n)});
+}
+
+Value *Abi::callN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
+                  ArrayRef<Value *> args) {
+  SmallVector<Type *, 8> tys;
+  tys.reserve(paramTypes.size() + 1);
+  tys.push_back(ptrTy_);  // sret 槽位
+  tys.append(paramTypes.begin(), paramTypes.end());
+
+  Function *f = getOrDeclare(fn, FunctionType::get(voidTy_, tys, false),
+                             /*hasSret=*/true);
+
+  Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+  SmallVector<Value *, 8> callArgs;
+  callArgs.reserve(args.size() + 1);
+  callArgs.push_back(ret);
+  callArgs.append(args.begin(), args.end());
+
+  CallInst *call = B.CreateCall(f, callArgs);
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+}
+
+void Abi::callVoidN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
+                    ArrayRef<Value *> args) {
+  Function *f =
+      getOrDeclare(fn, FunctionType::get(voidTy_, paramTypes, false),
+                   /*hasSret=*/false);
+  B.CreateCall(f, args);
 }
 
 Value *Abi::truthyAsI1(IRBuilder<> &B, Value *slot) {

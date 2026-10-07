@@ -10,6 +10,7 @@
 // 代价是多了一些栈流量,靠 LLVM 的优化去消。
 #pragma once
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 
@@ -30,8 +31,17 @@ class Abi {
   llvm::Type *voidTy() const { return voidTy_; }
   llvm::Attribute sretAttr() const { return sretAttr_; }
 
+  // 把 alloca 放进**函数入口块**。所有局部空间的分配都必须走这里 ——
+  // 这是硬性要求,不是优化,见 abi.cpp 里 allocEntry 的说明。
+  llvm::AllocaInst *allocEntry(llvm::IRBuilder<> &B, llvm::Type *ty,
+                               llvm::Value *count, const llvm::Twine &name);
+
   // 分配一个 PyValue 槽位
   llvm::Value *newSlot(llvm::IRBuilder<> &B, const llvm::Twine &name = "v");
+
+  // 分配一块 count 个 PyValue 的连续数组(用于给运行时传元素数组)
+  llvm::Value *newSlotArray(llvm::IRBuilder<> &B, int64_t count,
+                            const llvm::Twine &name);
 
   // 往槽位里写装箱的常量
   void storeInt(llvm::IRBuilder<> &B, llvm::Value *slot, int64_t v);
@@ -66,6 +76,25 @@ class Abi {
   // (PyValue) -> i32
   llvm::Value *callPredicate(llvm::IRBuilder<> &B, llvm::StringRef fn, llvm::Value *a);
 
+  // 通用形式:(PyValue*, <paramTypes...>) -> PyValue,返回值走 sret。
+  // 参数类型必须显式给出 —— 上面那些 call* 只覆盖了固定形状,而像
+  // py_slice(obj, lo, hi, step)、py_call_method(obj, name, len, args, n) 这种
+  // 混合指针与标量的签名没法用一个"全是 ptr"的 helper 表达。
+  //
+  // ⚠️ 不要省掉 paramTypes 自己拼一个全 ptr 的版本:cache_ 只按**函数名**缓存,
+  // 同一个名字被两种签名声明两次时,第二次会静默复用第一次的 Function* 配上
+  // 错误的 FunctionType,最终表现又是"链接通过、一执行就段错误"。
+  // getOrDeclare() 里做了签名校验,写错会立刻报错而不是等到运行时。
+  llvm::Value *callN(llvm::IRBuilder<> &B, llvm::StringRef fn,
+                     llvm::ArrayRef<llvm::Type *> paramTypes,
+                     llvm::ArrayRef<llvm::Value *> args);
+
+  // 不返回值的运行时函数(如 py_setindex)。参数全是普通指针/标量,
+  // 不涉及聚合体按值传递,所以没有 sret 那一位。
+  void callVoidN(llvm::IRBuilder<> &B, llvm::StringRef fn,
+                 llvm::ArrayRef<llvm::Type *> paramTypes,
+                 llvm::ArrayRef<llvm::Value *> args);
+
   // py_print(PyValue* vals, i64 n) —— 数组参数是普通指针,不受聚合体规则影响
   void callPrint(llvm::IRBuilder<> &B, llvm::Value *slotArray, int64_t n);
 
@@ -84,6 +113,19 @@ class Abi {
   void emitRuntimeError(llvm::IRBuilder<> &B, const llvm::Twine &msg);
 
  private:
+  // 按名字取回运行时函数:先查 cache_,再查当前 Module(可能是别处已经建过的),
+  // 都没有才按给定签名新建。三条路径的结果都会写回 cache_。
+  //
+  // 统一走这一个入口是有原因的:callPrint / callUnpack 早先是直接
+  // M_.getFunction() + Function::Create()、完全绕过 cache_ 的。那样一旦同一个
+  // 名字从两条路都被声明,LLVM 会把后建的那个改名成 py_print.1,而 DLL 里并没有
+  // 这个符号 —— 又是一次"链接通过、lookup 失败"。
+  //
+  // hasSret 为真时给第一个参数补 sret(%PyValue) 属性。签名不一致会直接
+  // report_fatal_error:这是编译器自身的内部约定被破坏,不能静默带过。
+  llvm::Function *getOrDeclare(llvm::StringRef name, llvm::FunctionType *ft,
+                               bool hasSret);
+
   llvm::Function *declareBinRet(llvm::StringRef name);     // (PyValue,PyValue)->PyValue
   llvm::Function *declareUnaryRet(llvm::StringRef name);   // (PyValue)->PyValue
   llvm::Function *declareNullaryRet(llvm::StringRef name); // ()->PyValue

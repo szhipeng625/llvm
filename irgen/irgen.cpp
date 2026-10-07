@@ -75,8 +75,13 @@ AllocaInst *IRGen::lookupVar(const std::string &name) const {
 }
 
 AllocaInst *IRGen::declareVar(const std::string &name) {
-  // alloca 统一放在入口块的最前面。放在当前插入点会出问题:
-  // 循环体里声明的变量每轮都会重新 alloca 一次,栈会一直涨。
+  // alloca 统一放在入口块的最前面。放在当前插入点会出问题:循环体里声明的
+  // 变量每轮都会重新 alloca 一次,栈会一直涨(同 Abi::allocEntry 里的说明)。
+  //
+  // 与 allocEntry 的差别是这里还要**紧跟着**写一次 None,而且必须在入口块里
+  // 紧挨着 alloca —— 变量可能在一个分支里声明、在另一个分支里被读,那时候
+  // 写 None 的那条指令根本没执行过,读到的是未初始化的内存。所以 alloca 和
+  // store 要成对地一起放进入口块。
   BasicBlock &entry = curFn_->getEntryBlock();
   IRBuilder<> tmp(&entry, entry.begin());
   auto *slot = tmp.CreateAlloca(abi_.valueTy(), nullptr, name);
@@ -114,8 +119,13 @@ Value *IRGen::genExpr(const Expr *e) {
     return s;
   }
   if (auto *x = dynamic_cast<const StringLit *>(e)) {
-    // 字符串要等 Stage 7 的运行时支持;先给出明确的报错而不是静默出错
-    irError(x->line, x->col, "字符串字面量尚未支持(计划在 Stage 7 实现)");
+    // 字节放在一个模块级常量里,长度显式传给 py_str_new。
+    // ⚠️ 必须用带长度的 StringRef,不能图省事走 .c_str() ——
+    // 词法层把 "\0" 解码成了真正的 NUL 字节(lexer.cpp),按 C 字符串处理会
+    // 在那里截断,而且 StringRef 从 std::string 构造本就是拿 data()/size()。
+    llvm::GlobalVariable *bytes = B_.CreateGlobalString(llvm::StringRef(x->value));
+    return abi_.callPtrI64(B_, "py_str_new", bytes,
+                           B_.getInt64(static_cast<int64_t>(x->value.size())));
   }
 
   // --- 名字 ---
@@ -134,51 +144,110 @@ Value *IRGen::genExpr(const Expr *e) {
   if (auto *x = dynamic_cast<const Call *>(e)) return genCall(x);
   if (auto *x = dynamic_cast<const TupleLit *>(e)) return genTupleLit(x);
   if (auto *x = dynamic_cast<const ListLit *>(e)) return genListLit(x);
+  if (auto *x = dynamic_cast<const DictLit *>(e)) return genDictLit(x);
+  if (auto *x = dynamic_cast<const Subscript *>(e)) return genSubscript(x);
+  if (auto *x = dynamic_cast<const SliceExpr *>(e)) return genSlice(x);
 
   if (auto *x = dynamic_cast<const RangeExpr *>(e)) {
     irError(x->line, x->col, "range() 只能直接用在 for 的迭代对象位置");
   }
   if (auto *x = dynamic_cast<const InputExpr *>(e)) return genInput(x);
-  if (auto *x = dynamic_cast<const DictLit *>(e)) {
-    irError(x->line, x->col, "字典字面量尚未支持(计划在 Stage 6 实现)");
-  }
-  if (auto *x = dynamic_cast<const Subscript *>(e)) {
-    irError(x->line, x->col, "下标访问尚未支持(计划在 Stage 6 实现)");
-  }
-  if (auto *x = dynamic_cast<const SliceExpr *>(e)) {
-    irError(x->line, x->col, "切片尚未支持(计划在 Stage 6 实现)");
-  }
   if (auto *x = dynamic_cast<const Attribute *>(e)) {
-    irError(x->line, x->col, "属性访问尚未支持(计划在 Stage 7 实现)");
+    // obj.attr 的取值形式没有实现,只有 obj.attr(...) 的调用形式(在 genCall 里)。
+    // 本语言没有属性(字段),所以这不算缺口 —— 但报错要说清楚,别让人以为
+    // 只是"暂时没做"。
+    irError(x->line, x->col,
+            "不支持单独的属性访问 '." + x->name + "';只有方法调用 '." + x->name +
+                "(...)' 是有意义的");
   }
 
   irError(e->line, e->col, "无法生成代码:不认识的表达式节点");
+}
+
+// ---------------------------------------------------------------------------
+// 连续数组的构造
+// ---------------------------------------------------------------------------
+
+void IRGen::storeElement(Value *array, size_t i, Value *slot) {
+  // 只能用**单索引**的 GEP。写成 {0, i} 是错的:源类型 %PyValue 是结构体,
+  // 第二个索引会被解释成"结构体的第几个字段",而不是数组的第几个元素。
+  // 单索引形式按 sizeof(%PyValue) 步进,正是数组取址要的语义。
+  Value *elem = B_.CreateGEP(abi_.valueTy(), array,
+                             B_.getInt64(static_cast<uint64_t>(i)), "elem.ptr");
+  B_.CreateStore(B_.CreateLoad(abi_.valueTy(), slot), elem);
+}
+
+Value *IRGen::evalToArray(const std::vector<ExprPtr> &items, const Twine &name) {
+  const size_t n = items.size();
+  if (n == 0) {
+    // 空数组传空指针。运行时不读它(元素个数另有一个 i64 参数)。
+    return ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+  }
+  Value *arr = abi_.newSlotArray(B_, static_cast<int64_t>(n), name);
+  for (size_t i = 0; i < n; ++i) storeElement(arr, i, genExpr(items[i].get()));
+  return arr;
+}
+
+Value *IRGen::noneSlot() {
+  Value *s = abi_.newSlot(B_, "none");
+  abi_.storeNone(B_, s);
+  return s;
 }
 
 // 构造一个真正的元组值(堆上分配)。用于 `return a, b` 这类场景。
 // 这里逐个求值后立即写入新数组是安全的 —— 数组是全新的,不存在
 // `a, b = b, a` 那种"写目标会覆盖读取来源"的问题。
 Value *IRGen::genTupleLit(const TupleLit *e) {
-  const size_t n = e->items.size();
-  if (n == 0) {
-    // 空元组:传个空指针,运行时不读它
-    return abi_.callPtrI64(B_, "py_tuple_new",
-                           ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy())),
-                           B_.getInt64(0));
-  }
-
-  Value *arr = B_.CreateAlloca(abi_.valueTy(), B_.getInt32(static_cast<uint32_t>(n)),
-                               "tuple.vals");
-  for (size_t i = 0; i < n; ++i) {
-    Value *v = genExpr(e->items[i].get());
-    Value *elem = B_.CreateGEP(abi_.valueTy(), arr, B_.getInt64(static_cast<uint64_t>(i)));
-    B_.CreateStore(B_.CreateLoad(abi_.valueTy(), v), elem);
-  }
-  return abi_.callPtrI64(B_, "py_tuple_new", arr, B_.getInt64(static_cast<uint64_t>(n)));
+  Value *arr = evalToArray(e->items, "tuple.vals");
+  return abi_.callPtrI64(B_, "py_tuple_new", arr,
+                         B_.getInt64(static_cast<uint64_t>(e->items.size())));
 }
 
 Value *IRGen::genListLit(const ListLit *e) {
-  irError(e->line, e->col, "列表字面量尚未支持(计划在 Stage 6 实现)");
+  Value *arr = evalToArray(e->items, "list.vals");
+  return abi_.callPtrI64(B_, "py_list_new", arr,
+                         B_.getInt64(static_cast<uint64_t>(e->items.size())));
+}
+
+Value *IRGen::genDictLit(const DictLit *e) {
+  const size_t n = e->items.size();
+
+  // py_dict_new 收的是**两条平行数组**(键一条、值一条),不是交错的。
+  // 空指针分别要单独申请:元素个数为 0 时两块指针都是空。
+  Value *keys = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+  Value *vals = keys;
+  if (n > 0) {
+    keys = abi_.newSlotArray(B_, static_cast<int64_t>(n), "dict.keys");
+    vals = abi_.newSlotArray(B_, static_cast<int64_t>(n), "dict.vals");
+    for (size_t i = 0; i < n; ++i) {
+      storeElement(keys, i, genExpr(e->items[i].first.get()));
+      storeElement(vals, i, genExpr(e->items[i].second.get()));
+    }
+  }
+
+  return abi_.callN(B_, "py_dict_new", {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty()},
+                    {keys, vals, B_.getInt64(static_cast<uint64_t>(n))});
+}
+
+// 下标。按 tag 分派到字符串/列表/元组/字典在运行时做 —— 编译期不知道
+// 变量的类型(类型注解不检查),所以这里只能是统一入口。
+Value *IRGen::genSubscript(const Subscript *e) {
+  Value *obj = genExpr(e->obj.get());
+  Value *idx = genExpr(e->index.get());
+  return abi_.callBinary(B_, "py_index", obj, idx);
+}
+
+// 切片。省略的边界传 None 槽位,由运行时按默认值处理 ——
+// 这样 IRGen 不必知道"省略上界"和"上界是 len"的区别(负步长下两者相反)。
+Value *IRGen::genSlice(const SliceExpr *e) {
+  Value *obj = genExpr(e->obj.get());
+  Value *lo = e->lo ? genExpr(e->lo.get()) : noneSlot();
+  Value *hi = e->hi ? genExpr(e->hi.get()) : noneSlot();
+  Value *step = e->step ? genExpr(e->step.get()) : noneSlot();
+  return abi_.callN(
+      B_, "py_slice",
+      {abi_.ptrTy(), abi_.ptrTy(), abi_.ptrTy(), abi_.ptrTy()},
+      {obj, lo, hi, step});
 }
 
 Value *IRGen::genBinOp(const BinOp *e) {
@@ -232,13 +301,67 @@ Value *IRGen::genUnaryOp(const UnaryOp *e) {
   irError(e->line, e->col, "无法生成代码:不支持的一元运算符 '" + e->op + "'");
 }
 
+// len(x) —— 内建。运行时按 tag 分派到字符串/列表/字典/元组。
+//
+// py_len 返回的是 i64 而不是 PyValue,这里负责装箱。不把 py_len 的返回类型
+// 定成 PyValue 是有意的:for 循环的条件要直接拿它跟下标比 i64;而且同一个
+// 符号名如果出现两种签名,Abi 的按名字缓存会静默配错 FunctionType。
+Value *IRGen::genLen(const Call *e) {
+  if (e->args.size() != 1) {
+    irError(e->line, e->col,
+            "len() 需要 1 个参数,给了 " + std::to_string(e->args.size()) + " 个");
+  }
+  Value *v = genExpr(e->args[0].get());
+  Value *slot = abi_.newSlot(B_, "len");
+  abi_.storeI64AsInt(B_, slot, abi_.callUnaryI64(B_, "py_len", v));
+  return slot;
+}
+
+// gc_collect() —— 手动触发一次垃圾回收。不返回值(语言里没有"空"的表达式,
+// 所以给一个 None,这样 `x = gc_collect()` 也有确定结果)。
+//
+// 命名上有意用下划线而不是 gc.collect():语言里没有模块概念,`gc.collect()`
+// 会被解析成"对变量 gc 做方法调用",而 gc 并不存在。
+Value *IRGen::genGcCollect(const Call *e) {
+  if (!e->args.empty()) {
+    irError(e->line, e->col,
+            "gc_collect() 不接受参数,给了 " + std::to_string(e->args.size()) + " 个");
+  }
+  abi_.callVoidN(B_, "py_gc_collect", {}, {});
+  return noneSlot();
+}
+
+// obj.method(args) —— 走运行时的统一分派入口。
+//
+// 为什么不在编译期解析成直接调用:本项目的类型注解不做检查,`x.upper()` 里的
+// x 到编译期根本没有静态类型。于是方法名拼错是**运行时**错误,这一点在
+// docs/language.md 里写明了。
+Value *IRGen::genMethodCall(const Call *e, const Attribute *attr) {
+  // 求值顺序与 Python 一致:先算对象,再算参数
+  Value *obj = genExpr(attr->obj.get());
+  Value *args = evalToArray(e->args, "call.args");
+
+  GlobalVariable *name = B_.CreateGlobalString(llvm::StringRef(attr->name));
+  return abi_.callN(
+      B_, "py_call_method",
+      {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty(), abi_.ptrTy(), abi_.i64Ty()},
+      {obj, name, B_.getInt64(static_cast<int64_t>(attr->name.size())), args,
+       B_.getInt64(static_cast<int64_t>(e->args.size()))});
+}
+
 Value *IRGen::genCall(const Call *e) {
+  if (auto *attr = dynamic_cast<const Attribute *>(e->callee.get())) {
+    return genMethodCall(e, attr);
+  }
+
   auto *name = dynamic_cast<const Name *>(e->callee.get());
   if (!name) {
-    irError(e->line, e->col, "只支持直接调用具名函数(方法调用计划在 Stage 7 实现)");
+    irError(e->line, e->col, "只支持调用具名函数或 obj.method(...) 形式的方法");
   }
 
   if (name->id == "print") return genPrint(e);
+  if (name->id == "len") return genLen(e);
+  if (name->id == "gc_collect") return genGcCollect(e);
 
   const std::string sym = symbolFor(name->id);
   Function *f = M_.getFunction(sym);
@@ -291,16 +414,12 @@ Value *IRGen::genInput(const InputExpr *e) {
   }
 
   // 把各次读取的结果堆进一块连续内存,再交给 py_tuple_new
-  Value *arr = B_.CreateAlloca(abi_.valueTy(), B_.getInt32(static_cast<uint32_t>(n)),
-                               "input.vals");
+  Value *arr = abi_.newSlotArray(B_, static_cast<int64_t>(n), "input.vals");
 
   for (size_t i = 0; i < n; ++i) {
     const char *fn = readerFor(e->kinds[i]);
     if (!fn) irError(e->line, e->col, "input() 的类型参数必须是 int/float/bool/str");
-    Value *v = abi_.callNullary(B_, fn);
-    // 单索引 GEP,语义是"数组第 i 个元素"(见 genPrint 里的说明)
-    Value *elem = B_.CreateGEP(abi_.valueTy(), arr, B_.getInt64(static_cast<uint64_t>(i)));
-    B_.CreateStore(B_.CreateLoad(abi_.valueTy(), v), elem);
+    storeElement(arr, i, abi_.callNullary(B_, fn));
   }
 
   return abi_.callPtrI64(B_, "py_tuple_new", arr, B_.getInt64(static_cast<uint64_t>(n)));
@@ -310,24 +429,10 @@ Value *IRGen::genInput(const InputExpr *e) {
 // 把数组指针交给运行时。数组是内存布局,不受"聚合体不按值传"的限制。
 Value *IRGen::genPrint(const Call *e) {
   const size_t n = e->args.size();
-
-  Value *arr = nullptr;
-  if (n == 0) {
-    arr = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
-  } else {
-    arr = B_.CreateAlloca(abi_.valueTy(), B_.getInt32(static_cast<uint32_t>(n)),
-                          "print.args");
-    for (size_t i = 0; i < n; ++i) {
-      Value *v = genExpr(e->args[i].get());
-      // 只能用**单索引**的 GEP。写成 {0, i} 是错的:源类型 %PyValue 是结构体,
-      // 第二个索引会被解释成"结构体的第几个字段",而不是数组的第几个元素 ——
-      // i=1 时算出来是 arr+8(写进了 args[0] 的 payload),i=2 直接字段越界。
-      // 单索引形式按 sizeof(%PyValue) 步进,正是数组取址要的语义。
-      Value *elem = B_.CreateGEP(abi_.valueTy(), arr,
-                                 B_.getInt64(static_cast<uint64_t>(i)), "arg.ptr");
-      B_.CreateStore(B_.CreateLoad(abi_.valueTy(), v), elem);
-    }
-  }
+  // 数组元素个数为 0 时 evalToArray 给空指针,py_print 也不会去读它。
+  // 这里曾经有个坑:用 {0, i} 的双索引 GEP 取数组元素是错的(第二个索引会被
+  // 当成"结构体的第几个字段"),现在统一由 storeElement 用单索引处理。
+  Value *arr = evalToArray(e->args, "print.args");
 
   abi_.callPrint(B_, arr, static_cast<int64_t>(n));
 
@@ -390,10 +495,21 @@ void IRGen::genAssign(const Assign *s) {
 
   // 单目标:`a = expr`
   if (n == 1) {
+    // 下标赋值 `a[i] = v`。求值顺序与 Python 一致:先算对象和下标,再算右侧 ——
+    // 反过来的话 `xs[0] = xs.pop()` 之类的写法会读到错的元素。
+    if (auto *sub = dynamic_cast<const Subscript *>(s->targets[0].get())) {
+      Value *obj = genExpr(sub->obj.get());
+      Value *idx = genExpr(sub->index.get());
+      Value *val = genExpr(s->value.get());
+      abi_.callVoidN(B_, "py_setindex", {abi_.ptrTy(), abi_.ptrTy(), abi_.ptrTy()},
+                     {obj, idx, val});
+      return;
+    }
+
     Value *v = genExpr(s->value.get());
     auto *name = dynamic_cast<const Name *>(s->targets[0].get());
     if (!name) {
-      irError(s->line, s->col, "目前只支持给变量赋值");
+      irError(s->line, s->col, "赋值目标只能是变量或下标(如 a[i] = ...)");
     }
     AllocaInst *slot = lookupVar(name->id);
     if (!slot) slot = declareVar(name->id);
@@ -429,8 +545,7 @@ void IRGen::genAssign(const Assign *s) {
   // 覆盖 `a, b = f()`(函数多返回值)和 `a, b = input(int, int)`。
   // 元素个数不匹配由 py_unpack 在运行时给出明确报错。
   Value *tup = genExpr(s->value.get());
-  Value *out = B_.CreateAlloca(abi_.valueTy(), B_.getInt32(static_cast<uint32_t>(n)),
-                               "unpack.vals");
+  Value *out = abi_.newSlotArray(B_, static_cast<int64_t>(n), "unpack.vals");
   abi_.callUnpack(B_, tup, out, static_cast<int64_t>(n));
 
   std::vector<Value *> slots;
@@ -444,9 +559,13 @@ void IRGen::genAssign(const Assign *s) {
 }
 
 void IRGen::assignToTargets(const Assign *s, const std::vector<Value *> &vals) {
+  // 多目标赋值的目标只能是变量:`xs[0], xs[1] = 1, 2` 这种没实现。
+  // 单目标的下标赋值在 genAssign 里单独处理。
   for (size_t i = 0; i < s->targets.size(); ++i) {
     auto *name = dynamic_cast<const Name *>(s->targets[i].get());
-    if (!name) irError(s->line, s->col, "目前只支持给变量赋值");
+    if (!name) {
+      irError(s->line, s->col, "多目标赋值的目标只能是变量(下标赋值请分开写)");
+    }
     AllocaInst *slot = lookupVar(name->id);
     if (!slot) slot = declareVar(name->id);
     abi_.copySlot(B_, slot, vals[i]);
@@ -462,15 +581,27 @@ std::vector<Value *> IRGen::evalAll(const std::vector<ExprPtr> &items) {
 
 void IRGen::genAugAssign(const AugAssign *s) {
   auto *name = dynamic_cast<const Name *>(s->target.get());
-  if (!name) irError(s->line, s->col, "复合赋值目前只支持变量");
+  if (!name) {
+    irError(s->line, s->col, "复合赋值目前只支持变量(下标形式如 a[i] += 1 尚未支持)");
+  }
 
   AllocaInst *slot = lookupVar(name->id);
   if (!slot) irError(s->line, s->col, "使用了未定义的变量 '" + name->id + "'");
 
+  Value *rhs = genExpr(s->value.get());
+
+  // `+=` 走 py_iadd 而不是 py_add:列表的 `xs += [x]` 必须**就地** extend
+  // (别名看得见),与 `xs = xs + [x]` 的重新绑定语义不同 —— 见 runtime/arith.cpp。
+  // 字符串与数值不可变,py_iadd 内部退回 py_add,写回本地槽位即可。
+  if (s->op == "+") {
+    Value *result = abi_.callBinary(B_, "py_iadd", slot, rhs);
+    abi_.copySlot(B_, slot, result);
+    return;
+  }
+
   const char *fn = runtimeForBinOp(s->op);
   if (!fn) irError(s->line, s->col, "复合赋值不支持运算符 '" + s->op + "'");
 
-  Value *rhs = genExpr(s->value.get());
   Value *result = abi_.callBinary(B_, fn, slot, rhs);
   abi_.copySlot(B_, slot, result);  // 结果写回原变量
 }
@@ -535,13 +666,60 @@ void IRGen::genWhile(const While *s) {
 }
 
 void IRGen::genFor(const For *s) {
-  // range(...) 直接降成计数循环;其余迭代对象(列表)走通用路径,
-  // 计划在 Stage 6 实现。
+  // range(...) 直接降成计数循环;其余可迭代对象(列表/字符串/字典)走通用路径。
   if (auto *r = dynamic_cast<const RangeExpr *>(s->iterable.get())) {
     return genForRange(s, r);
   }
-  irError(s->line, s->col,
-          "只支持 for ... in range(...);遍历列表计划在 Stage 6 实现");
+  return genForIterable(s);
+}
+
+// for x in <list|str|dict> —— 降成"下标从 0 数到 len"的计数循环。
+//
+// 不构造任何迭代器对象:运行时只需要 py_len 与 py_iter_at 两个原语。
+// 两个细节是照着 Python 的语义来的:
+//
+//   * 可迭代对象在**循环外**只求值一次,绑进一个临时槽位。循环体里给 xs
+//     重新赋值不该改变正在遍历的东西(Python 的迭代器在进入循环时就绑定了)。
+//   * 长度在**条件里每轮重读**。于是循环体里 append 进去的元素也会被遍历到,
+//     这也正是 Python 的行为。
+void IRGen::genForIterable(const For *s) {
+  Function *fn = curFn_;
+
+  Value *src = genExpr(s->iterable.get());
+  Value *seq = abi_.newSlot(B_, "for.seq");
+  abi_.copySlot(B_, seq, src);   // 绑定一份,后面重新赋值变量不影响它
+  BasicBlock *preBB = B_.GetInsertBlock();
+
+  BasicBlock *condBB = BasicBlock::Create(Ctx_, "for.cond", fn);
+  BasicBlock *bodyBB = BasicBlock::Create(Ctx_, "for.body", fn);
+  BasicBlock *latchBB = BasicBlock::Create(Ctx_, "for.latch", fn);
+  BasicBlock *exitBB = BasicBlock::Create(Ctx_, "for.exit", fn);
+  B_.CreateBr(condBB);
+
+  B_.SetInsertPoint(condBB);
+  PHINode *i = B_.CreatePHI(abi_.i64Ty(), 2, "i");
+  i->addIncoming(ConstantInt::get(abi_.i64Ty(), 0), preBB);
+  Value *len = abi_.callUnaryI64(B_, "py_len", seq);
+  B_.CreateCondBr(B_.CreateICmpSLT(i, len, "for.keep"), bodyBB, exitBB);
+
+  B_.SetInsertPoint(bodyBB);
+  AllocaInst *ivar = lookupVar(s->var);
+  if (!ivar) ivar = declareVar(s->var);
+  // 每轮重新绑定循环变量。py_iter_at 对字典取的是**键**,不是 d[i] 那种按键查找
+  // (见 runtime/index.cpp 的说明)。
+  abi_.copySlot(B_, ivar, abi_.callPtrI64(B_, "py_iter_at", seq, i));
+  loops_.push_back({latchBB, exitBB});
+  genBlock(s->body);
+  loops_.pop_back();
+  // continue 跳到 latch,所以自增不会被跳过
+  if (!B_.GetInsertBlock()->getTerminator()) B_.CreateBr(latchBB);
+
+  B_.SetInsertPoint(latchBB);
+  Value *next = B_.CreateAdd(i, ConstantInt::get(abi_.i64Ty(), 1), "next");
+  i->addIncoming(next, latchBB);
+  B_.CreateBr(condBB);
+
+  B_.SetInsertPoint(exitBB);
 }
 
 // for i in range(a, b, step) 降成带 PHI 的计数循环,不构造任何迭代器对象。

@@ -7,3 +7,10 @@ lo, hi = minmax(3, 7)
 print(lo, hi)
 lo, hi = minmax(9, 4)
 print(lo, hi)
+
+# 单元素元组靠尾随逗号区分:(1,) 是元组,(1) 就是 1
+def single():
+    return 1,
+
+one = single()
+print(one, len(one), one[0])
