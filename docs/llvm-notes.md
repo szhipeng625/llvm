@@ -118,6 +118,123 @@ C->addParamAttr(0, SretAttr);
 对照函数 `jit_add_plain`:它证明 JIT 执行路径本身是好的,从而把问题精确锁定
 在 ABI 边界上。
 
+## 2.1 ⚠️ 一个运行时符号名只能对应一种签名
+
+**与第 2 节同一类故障:静态检查全过,一执行就崩。**
+
+`irgen/abi.h` 里的 `cache_` 是 `std::map<std::string, Function*>`,**只按函数名
+缓存,不记签名**。于是:
+
+```cpp
+// 先在某个调用点按 (ptr, i64) -> void 建了 py_print
+// 之后另一个调用点又按 (ptr) -> i64 要它
+// → cache_.find 命中,直接返回上面那个 Function*
+// → 用错的 FunctionType 生成调用,而 LLVM 不报错
+```
+
+规避办法有两条,项目里都落实了:
+
+1. **不要写死形状的 helper。** `Abi` 上那些 `callBinary` / `callUnary` /
+   `callPtrI64` 只覆盖固定形状;混合指针与标量的签名走
+   `callN(B, fn, paramTypes, args)`,**参数类型必须显式给出**。想省事拼一个
+   "全是 ptr" 的版本是不行的 —— 例如 `py_call_method(obj, name, nameLen, args,
+   nargs)` 里有两个 i64,`py_dict_new(keys, vals, n)` 里有一个 i64。
+2. **统一 get-or-create 入口。** 所有声明都过 `Abi::getOrDeclare()`:先查
+   `cache_`,再查当前 Module,都没有才新建,三条路径的结果都写回 `cache_`,
+   并校验签名一致 —— 不一致直接 `report_fatal_error`,而不是等到运行时崩。
+   早先 `callPrint` / `callUnpack` 是绕过 `cache_`、直接
+   `M_.getFunction()` + `Function::Create()` 的,一旦有别的路径也声明这两个
+   名字,LLVM 会把后建的那个改名成 `py_print.1`,而 DLL 里并没有这个符号。
+
+顺带一条相关的:`py_len` 刻意返回 `int64_t` 而不是 `PyValue`。除了 for 循环的
+条件要直接拿 i64 比之外,也是为了避免"同一个 `py_len` 既要 PyValue 版本又要
+i64 版本" —— 那就正好撞上上面这个缓存陷阱。`len(x)` 的调用点自己用
+`storeI64AsInt` 装箱。
+
+## 2.2 ⚠️ alloca 必须放在函数入口块
+
+**症状:循环跑几十万次之后进程直接消失,没有任何输出。**
+
+LLVM 只把**函数入口块里**的 alloca 当静态栈槽 —— `AllocaInst::isStaticAlloca()`
+除了要求大小是常量,还明确要求 `Parent == 入口块`。放在别处(典型是循环体里)
+的 alloca 会被降低成**真正调整栈指针**的动态分配,每次执行都吃掉一份栈空间,
+而且函数返回前不会归还。
+
+于是这样一行代码就能踩中:
+
+```python
+for i in range(200000):
+    total = total + i
+```
+
+`py_add` 的结果需要一个 16 字节的 `%PyValue` 槽位,slot 又是按需分配的
+(`Abi::newSlot`),于是循环体里出现了一个 alloca。实测:
+
+| 迭代次数 | 结果 |
+|---|---|
+| 50000 | 正常 |
+| 200000 | 崩溃(进程异常退出,无输出) |
+
+**硬性要求:所有局部空间的分配都走 `Abi::allocEntry()`**(以及它的两个包装
+`newSlot` / `newSlotArray`),它会把 alloca 放进当前函数的入口块。语义上仍然
+正确 —— 每次函数调用都会新建,只是空间在序言里一次分配、循环里反复复用。
+
+两个例外,都必须成对处理:
+
+- `IRGen::declareVar` 除了 alloca 还要**紧挨着**写一次 None 初始化,所以它自己
+  用临时 IRBuilder 把 alloca 和 store 一起放进入口块。顺序不能反 —— 在同一个
+  基本块里引用后面才定义的 alloca 违反 SSA 支配关系,IR 验证会直接报错。
+- 初始化必须是入口块里的那条 store,不能挪到当前插入点:变量可能在一个分支里
+  声明、在另一个分支里被读,那时写 None 的指令根本没执行过。
+
+回归用例是 `tests/e2e/long_loop.pys`(20 万次迭代,比 1MB 默认栈能撑住的量级大)。
+
+## 2.3 垃圾回收为什么不需要 IRGen 配合
+
+`runtime/gc.cpp` 是保守式标记-清除:根靠**扫描当前线程的栈与寄存器**找到,
+IRGen 不需要生成任何根登记代码,ABI 一个字没动。这在这里行得通,靠的是本项目
+本来就有的两条约定:
+
+1. **只有容器是堆对象**,`int`/`float`/`bool`/`None` 是内联标量、根本不分配
+   (`value.h`)。堆上全是 `PyStr`/`PyList`/`PyDict`/`PyTuple`。
+2. **每个 PyValue 都住在栈上的 alloca 里**,而且槽位地址几乎都会传给 DLL 里的
+   不透明运行时函数(`py_add`、`py_print`、`py_call_method`…)。
+
+第 2 条是关键。`mem2reg`/`SROA` 只能提升"地址不逃逸"的 alloca,而这里槽位地址
+**逃逸到了外部函数**,所以 LLVM 提升不掉它们 —— 在任何会触发回收的调用点上,
+活着的值一定在内存里(调用者的栈槽,或调用者栈上的数组),而不是只在某个 SSA
+寄存器里。
+
+### 因此有三条不能破的约束
+
+1. **不要给运行时函数加 `nounwind` / `readnone` / `willreturn` 等属性。**
+   现在除了 `py_runtime_error` 标了 `NoReturn`,其余一律无属性,LLVM 必须把它们
+   当成读写内存的不透明屏障。这正是保守式 GC 需要的。为了跑分去加属性会破坏它。
+2. **所有局部空间仍然必须放进入口块**(见 2.2 节)。既是栈不涨的要求,也保证了
+   槽位地址稳定、可被扫到。
+3. **runtime 侧的 C++ 局部指针是薄弱环节。** 一个刚分配、只被 C++ 局部变量持有的
+   对象跨过一次嵌套分配时,它既不在容器里、也不在 IRGen 的 alloca 保证范围内,
+   只能靠"编译器恰好把它 spill 到栈上"——那是**每十万次分配中一次**的静默内存
+   损坏。这类位置一律用 `py_gc_root_push` / `py_gc_root_pop` 显式登记(约十处,
+   如 `list.cpp` 的 `newList`、`dict.cpp` 的 `reserve`)。
+
+### 寄存器是怎么抓到的
+
+在回收函数里放一个 `jmp_buf` 局部变量,用 `setjmp` 把非易失寄存器溢写到这块栈
+内存上,再把 `jmp_buf` 一起扫。本机 `D:\msys64\ucrt64\include\setjmp.h` 的
+`_JUMP_BUFFER` 布局是 `Rbx/Rsi/Rdi/R12-R15/Rsp/Rbp/Rip` 等全部非易失寄存器
+(实测七个寄存器逐个验证过)。跨调用仍活着的值必然在 callee-saved 寄存器或栈上,
+所以这个快照够用。
+
+两个注意点:
+
+- **不读 `setjmp` 的返回值做分支,更不要调 `longjmp`。** 它在这里只是"溢写寄存器"
+  的手段;读返回值会让 GCC 真按"返回两次"构造 CFG。
+- **栈的上界用 `NT_TIB.StackBase`(x64 上是 `gs:0x08`),绝不能用 `StackLimit`。**
+  Windows 栈按需 commit,从 `StackLimit` 往上扫会碰到未提交页 → 访问违例。
+  用内联汇编读 `gs:0x08` 而不是 `<windows.h>`:运行时的很多 TU 只有几行 include,
+  引入 windows.h 的 `min`/`max`/`ERROR` 宏会显著改变编译结果。
+
 ## 3. LLVM 22 的 API 与常见教程的差异
 
 以下都是在本机 LLVM 22.1.8 头文件里核对过的,与多数网上教程(基于 LLVM 14–17)不同。

@@ -1,0 +1,42 @@
+# PyLite 侧 —— 只写业务逻辑,不碰 I/O。
+#
+# 这个模块被 pylitec 编译成 scores.o,由同目录的 main.cpp 链接调用。
+# 符号命名规则是 pylite_<模块名>_<函数名>,模块名取主文件名(scores)。
+
+# 顶层语句会被编译进 pylite_scores_main(),C++ 调它时执行。
+# 顶层可以做初始化,但这里刻意什么都不留 —— 因为 GC 只把**栈上**的引用
+# 当作根,顶层语句里的局部变量在 main 返回后就没了。
+print("[pys] scores.pys 顶层执行")
+
+# 把列表里的每个值夹到 [lo, hi]
+def clamp_all(xs, lo, hi):
+    out = []
+    for x in xs:
+        if x < lo:
+            out.append(lo)
+        elif x > hi:
+            out.append(hi)
+        else:
+            out.append(x)
+    return out
+
+# 多返回值:一个元组。C++ 侧用 py_unpack 拆开。
+def total_and_count(xs):
+    total = 0
+    for x in xs:
+        total = total + x
+    return total, len(xs)
+
+# 收字符串参数、返回字符串
+def grade(name, score):
+    if score >= 90:
+        return name + " -> A"
+    if score >= 60:
+        return name + " -> B"
+    return name + " -> C"
+
+# 返回浮点:C++ 侧用 py_as_float 取出来
+def average(total, count):
+    if count == 0:
+        return 0.0
+    return total / count

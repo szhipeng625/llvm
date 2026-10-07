@@ -193,6 +193,27 @@ add_test(NAME linktest
                  -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/tests/linktest/arith.expected
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_output.cmake)
 
+# ---------------------------------------------------------------------------
+# 混合语言示例:C++ 宿主 + PyLite 业务逻辑
+# ---------------------------------------------------------------------------
+# examples/mixed/ 是给人看的一个完整例子(C++ 造数据、PyLite 算、C++ 收结果),
+# 文档在同目录的 README.md。这里把它接进构建,保证它随时可编译可链接。
+#
+# 只断言"退出码为 0",不比对 stdout:它的输出是给人看的中文,
+# 而 tests/compare_output.cmake 在 Windows 上只能比 ASCII。
+set(MIXED_OBJ ${CMAKE_CURRENT_BINARY_DIR}/mixed/scores.o)
+add_custom_command(
+  OUTPUT ${MIXED_OBJ}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/mixed
+  COMMAND pylitec ${CMAKE_CURRENT_SOURCE_DIR}/examples/mixed/scores.pys
+          -o ${MIXED_OBJ}
+  DEPENDS pylitec ${CMAKE_CURRENT_SOURCE_DIR}/examples/mixed/scores.pys
+  COMMENT "pylitec mixed/scores.pys")
+
+add_executable(mixed_demo examples/mixed/main.cpp ${MIXED_OBJ})
+target_link_libraries(mixed_demo PRIVATE pylite_runtime)
+
+add_test(NAME mixed_demo COMMAND mixed_demo)
 
 foreach(t ${E2E_CASES})
   set(pys ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/${t}.pys)
