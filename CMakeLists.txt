@@ -52,6 +52,7 @@ add_library(pylite_runtime SHARED
   runtime/tokenizer.cpp
   runtime/server.cpp
   runtime/quantize.cpp
+  runtime/engine.cpp
 )
 target_include_directories(pylite_runtime PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

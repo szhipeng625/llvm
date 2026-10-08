@@ -341,4 +341,15 @@ PyValue py_quantize_verify_precision(const PyValue *fp16Values,
                                       const PyValue *awqValues);
 PyValue py_quantize_model_info(const PyValue *modelPath);
 
+// --- PyLite 原生推理服务引擎 ---------------------------------------------
+// vLLM 风格的 LLM 推理引擎：PagedAttention KV Cache + 连续批处理。
+PyValue py_engine_init(const PyValue *configJson);
+PyValue py_engine_add_request(const PyValue *prompt, const PyValue *maxTokens,
+                               const PyValue *temperature, const PyValue *topP,
+                               const PyValue *topK);
+PyValue py_engine_step();
+PyValue py_engine_status();
+void py_engine_reset();
+PyValue py_engine_serve(const PyValue *port);
+
 }  // extern "C"
