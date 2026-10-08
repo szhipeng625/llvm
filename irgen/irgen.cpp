@@ -234,7 +234,7 @@ Value *IRGen::genDictLit(const DictLit *e) {
 Value *IRGen::genSubscript(const Subscript *e) {
   Value *obj = genExpr(e->obj.get());
   Value *idx = genExpr(e->index.get());
-  return abi_.callBinary(B_, "py_index", obj, idx);
+  return abi_.callN(B_, "py_index", {abi_.ptrTy(), abi_.ptrTy()}, {obj, idx});
 }
 
 // 切片。省略的边界传 None 槽位,由运行时按默认值处理 ——
@@ -349,8 +349,117 @@ Value *IRGen::genMethodCall(const Call *e, const Attribute *attr) {
        B_.getInt64(static_cast<int64_t>(e->args.size()))});
 }
 
+// 内置模块名 → 运行时函数前缀映射
+// 让 PyLite 脚本能直接写 docker.run()、llm.chat() 等原生语法
+static const char *builtinModulePrefix(const std::string &mod, const std::string &fn) {
+  // Docker 模块
+  if (mod == "docker") {
+    if (fn == "run") return "py_docker_run";
+    if (fn == "ps") return "py_docker_ps";
+    if (fn == "stop") return "py_docker_stop";
+    if (fn == "logs") return "py_docker_logs";
+    if (fn == "pull") return "py_docker_pull";
+    if (fn == "generate_dockerfile") return "py_docker_generate_dockerfile";
+    if (fn == "build") return "py_docker_build";
+    if (fn == "push") return "py_docker_push";
+    if (fn == "project_package") return "py_docker_project_package";
+  }
+  // LLM 模块
+  if (mod == "llm") {
+    if (fn == "chat") return "py_llm_chat";
+    if (fn == "create_network") return "py_llm_create_network";
+    if (fn == "add_layer") return "py_llm_add_layer";
+    if (fn == "network_summary") return "py_llm_network_summary";
+    if (fn == "create_dataset") return "py_llm_create_dataset";
+    if (fn == "upload_file") return "py_llm_upload_file";
+    if (fn == "create_finetune") return "py_llm_create_finetune";
+    if (fn == "finetune_status") return "py_llm_finetune_status";
+    if (fn == "list_finetunes") return "py_llm_list_finetunes";
+  }
+  // CUDA 模块
+  if (mod == "cuda") {
+    if (fn == "info") return "py_cuda_info";
+    if (fn == "compile_ptx") return "py_cuda_compile_ptx";
+    if (fn == "launch_kernel") return "py_cuda_launch_kernel";
+    if (fn == "alloc") return "py_cuda_alloc";
+    if (fn == "free") return "py_cuda_free";
+    if (fn == "memcpy_to_device") return "py_cuda_memcpy_to_device";
+    if (fn == "memcpy_from_device") return "py_cuda_memcpy_from_device";
+  }
+  // Fusion 模块
+  if (mod == "fusion") {
+    if (fn == "create_graph") return "py_fusion_create_graph";
+    if (fn == "add_op") return "py_fusion_add_op";
+    if (fn == "apply_rules") return "py_fusion_apply_rules";
+    if (fn == "generate_kernel") return "py_fusion_generate_kernel";
+    if (fn == "autotune") return "py_fusion_autotune";
+    if (fn == "compile_and_run") return "py_fusion_compile_and_run";
+    if (fn == "benchmark") return "py_fusion_benchmark";
+  }
+  // Inference 模块
+  if (mod == "inference") {
+    if (fn == "load_model") return "py_inference_load_model";
+    if (fn == "generate") return "py_inference_generate";
+    if (fn == "kv_cache_stats") return "py_inference_kv_cache_stats";
+    if (fn == "flash_attention_kernel") return "py_inference_flash_attention_kernel";
+    if (fn == "multi_gpu_info") return "py_inference_multi_gpu_info";
+    if (fn == "profile") return "py_inference_profile";
+    if (fn == "unload") return "py_inference_unload";
+  }
+  // Tokenizer 模块
+  if (mod == "tokenizer") {
+    if (fn == "load") return "py_tokenizer_load";
+    if (fn == "encode") return "py_tokenizer_encode";
+    if (fn == "decode") return "py_tokenizer_decode";
+    if (fn == "info") return "py_tokenizer_info";
+  }
+  // Server 模块
+  if (mod == "server") {
+    if (fn == "start") return "py_server_start";
+    if (fn == "stop") return "py_server_stop";
+    if (fn == "status") return "py_server_status";
+  }
+  // Quantize 模块
+  if (mod == "quantize") {
+    if (fn == "fp16_to_awq") return "py_quantize_fp16_to_awq";
+    if (fn == "arch_template") return "py_quantize_arch_template";
+    if (fn == "verify_precision") return "py_quantize_verify_precision";
+    if (fn == "model_info") return "py_quantize_model_info";
+  }
+  return nullptr;
+}
+
 Value *IRGen::genCall(const Call *e) {
+  // 检查是否是内置模块调用: docker.run(...) / llm.chat(...) 等
   if (auto *attr = dynamic_cast<const Attribute *>(e->callee.get())) {
+    if (auto *modName = dynamic_cast<const Name *>(attr->obj.get())) {
+      const char *rtFn = builtinModulePrefix(modName->id, attr->name);
+      if (rtFn) {
+        // 内置模块调用: 直接映射到运行时函数
+        // 所有参数都是 PyValue* 指针，通过 callN 传递
+        std::vector<Value *> argSlots;
+        std::vector<Type *> argTypes;
+        argSlots.reserve(e->args.size());
+        argTypes.reserve(e->args.size());
+        for (const auto &a : e->args) {
+          Value *slot = genExpr(a.get());
+          argSlots.push_back(slot);
+          argTypes.push_back(abi_.ptrTy());
+        }
+
+        // 对于返回 void 的函数（docker_stop, cuda_free, cuda_memcpy_to_device）
+        if (std::string(rtFn) == "py_docker_stop" ||
+            std::string(rtFn) == "py_cuda_free" ||
+            std::string(rtFn) == "py_cuda_memcpy_to_device") {
+          abi_.callVoidN(B_, rtFn, argTypes, argSlots);
+          Value *res = abi_.newSlot(B_, "mod.ret");
+          abi_.storeNone(B_, res);
+          return res;
+        }
+
+        return abi_.callN(B_, rtFn, argTypes, argSlots);
+      }
+    }
     return genMethodCall(e, attr);
   }
 
@@ -369,8 +478,8 @@ Value *IRGen::genCall(const Call *e) {
     irError(e->line, e->col, "调用了未定义的函数 '" + name->id + "'");
   }
 
-  // 参数个数:第一个是 sret 指针,其余与用户参数一一对应
-  const size_t expected = f->arg_size() - 1;
+  // Linux: 无 sret 指针，参数个数直接等于用户参数个数
+  const size_t expected = f->arg_size();
   if (e->args.size() != expected) {
     irError(e->line, e->col,
             "函数 '" + name->id + "' 需要 " + std::to_string(expected) +
@@ -379,12 +488,14 @@ Value *IRGen::genCall(const Call *e) {
 
   Value *ret = abi_.newSlot(B_, name->id + ".ret");
   std::vector<Value *> callArgs;
-  callArgs.reserve(e->args.size() + 1);
-  callArgs.push_back(ret);
-  for (const auto &a : e->args) callArgs.push_back(genExpr(a.get()));
+  callArgs.reserve(e->args.size());
+  for (const auto &a : e->args) {
+    Value *slot = genExpr(a.get());
+    callArgs.push_back(B_.CreateLoad(abi_.valueTy(), slot));
+  }
 
-  CallInst *call = B_.CreateCall(f, callArgs);
-  call->addParamAttr(0, abi_.sretAttr());
+  Value *val = B_.CreateCall(f, callArgs, name->id + ".r");
+  B_.CreateStore(val, ret);
   return ret;
 }
 
@@ -594,7 +705,7 @@ void IRGen::genAugAssign(const AugAssign *s) {
   // (别名看得见),与 `xs = xs + [x]` 的重新绑定语义不同 —— 见 runtime/arith.cpp。
   // 字符串与数值不可变,py_iadd 内部退回 py_add,写回本地槽位即可。
   if (s->op == "+") {
-    Value *result = abi_.callBinary(B_, "py_iadd", slot, rhs);
+    Value *result = abi_.callN(B_, "py_iadd", {abi_.ptrTy(), abi_.ptrTy()}, {slot, rhs});
     abi_.copySlot(B_, slot, result);
     return;
   }
@@ -793,7 +904,8 @@ void IRGen::genReturn(const Return *s) {
   } else {
     abi_.storeNone(B_, retSlot_);
   }
-  B_.CreateRetVoid();
+  Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
+  B_.CreateRet(retVal);
 }
 
 // ---------------------------------------------------------------------------
@@ -806,17 +918,18 @@ void IRGen::genFunction(const FuncDef *fd) {
   // generate() 的第一趟已经建好声明
 
   curFn_ = fn;
-  retSlot_ = fn->getArg(0);
   scopes_.emplace_back();
 
   BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", fn);
   B_.SetInsertPoint(entry);
 
-  // 参数复制进本地的槽位。不能直接用传进来的指针 —— 那是调用方的槽位,
-  // 函数体内给参数赋值会改到调用方的变量。
+  // Linux: 返回值槽改为本地 alloca，不再从 sret 参数获取
+  retSlot_ = abi_.newSlot(B_, fd->name + ".ret");
+
+  // 参数按值传入，需要 store 到本地栈槽
   for (size_t i = 0; i < fd->params.size(); ++i) {
     AllocaInst *slot = declareVar(fd->params[i].first);
-    abi_.copySlot(B_, slot, fn->getArg(static_cast<unsigned>(i + 1)));
+    B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
   }
 
   // Python 的函数走到末尾会隐式返回 None。入口处先写一次 None,
@@ -824,7 +937,10 @@ void IRGen::genFunction(const FuncDef *fd) {
   abi_.storeNone(B_, retSlot_);
 
   genBlock(fd->body);
-  if (!B_.GetInsertBlock()->getTerminator()) B_.CreateRetVoid();
+  if (!B_.GetInsertBlock()->getTerminator()) {
+    Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
+    B_.CreateRet(retVal);
+  }
 
   scopes_.pop_back();
   curFn_ = nullptr;
@@ -872,11 +988,10 @@ void IRGen::generate(const Module &ast) {
     funcs_.push_back(fd);
 
     std::vector<Type *> params;
-    params.push_back(abi_.ptrTy());  // sret
-    for (size_t i = 0; i < fd->params.size(); ++i) params.push_back(abi_.ptrTy());
-    auto *ft = FunctionType::get(abi_.voidTy(), params, false);
+    for (size_t i = 0; i < fd->params.size(); ++i) params.push_back(abi_.valueTy());
+    // Linux: 用户函数按值接收和返回 PyValue 结构体
+    auto *ft = FunctionType::get(abi_.valueTy(), params, false);
     auto *fn = Function::Create(ft, Function::ExternalLinkage, sym, M_);
-    fn->addParamAttr(0, abi_.sretAttr());
   }
 
   // 第二趟:填函数体

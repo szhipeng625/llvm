@@ -287,14 +287,28 @@ void **g_roots = nullptr;
 size_t g_rootLen = 0;
 size_t g_rootCap = 0;
 
-// 栈上界。x64 上 GS 指向 TEB,NT_TIB.StackBase 在 gs:0x08。
-// 用内联汇编而不是 <intrin.h>/<windows.h> —— 运行时的很多 TU 只有几行 include,
-// 引入 windows.h 的 min/max/ERROR 宏会显著改变编译结果。
+// 栈上界。
+// Windows: x64 上 GS 指向 TEB,NT_TIB.StackBase 在 gs:0x08。
+// Linux: 用 pthread_getattr_np 获取栈基址。
+#ifdef __linux__
+#include <pthread.h>
+uintptr_t stackBaseFromTeb() {
+  pthread_attr_t attr;
+  void *stackaddr = nullptr;
+  size_t stacksize = 0;
+  pthread_getattr_np(pthread_self(), &attr);
+  pthread_attr_getstack(&attr, &stackaddr, &stacksize);
+  pthread_attr_destroy(&attr);
+  // 栈在高地址向低地址增长，基址 = 栈顶 + 栈大小
+  return reinterpret_cast<uintptr_t>(stackaddr) + stacksize;
+}
+#else
 uintptr_t stackBaseFromTeb() {
   uintptr_t v;
   asm volatile("movq %%gs:0x08, %0" : "=r"(v));
   return v;
 }
+#endif
 
 void markRoots() {
   jmp_buf jb;

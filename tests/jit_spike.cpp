@@ -62,31 +62,20 @@ std::unique_ptr<Module> buildSpikeModule(LLVMContext &Ctx, const DataLayout &DL)
 
   // ---- 实验组:调用运行时 py_add ----
   //
-  // 关键:必须按 Win64 ABI 显式声明边界 —— 16 字节聚合体按引用传递,
-  // 返回值走隐藏的 sret 指针。落到寄存器就是:
-  //     RCX = sret 返回缓冲区, RDX = &a, R8 = &b
-  // 这正是 GCC 编译 `PyValue py_add(PyValue, PyValue)` 时期望的约定
-  // (见 build 目录下 objdump 出的 py_add 序言)。
-  //
-  // 反面教材:如果写成 `declare %PyValue @py_add(%PyValue, %PyValue)` 按值声明,
-  // LLVM 会挑另一套降低方式,与 GCC 不一致 —— 调用时直接段错误(已实测)。
+  // Linux System V ABI: 16 字节的 {i32, i64} 结构体通过 RAX+RDX 寄存器
+  // 直接返回，不需要 sret 指针。函数声明为 %PyValue @py_add(ptr, ptr)。
   auto *Ptr = PointerType::getUnqual(Ctx);
-  Attribute SretAttr = Attribute::getWithStructRetType(Ctx, V);
-  Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr, Ptr}, false),
-                   Function::ExternalLinkage, "py_add", *M)
-      ->addParamAttr(0, SretAttr);
+  // Linux: py_add 按值接收和返回 PyValue 结构体
+  Function::Create(FunctionType::get(V, {V, V}, false),
+                   Function::ExternalLinkage, "py_add", *M);
   {
     auto *Fn = Function::Create(BinTy, Function::ExternalLinkage, "jit_add_boxed", *M);
     auto *BB = BasicBlock::Create(Ctx, "entry", Fn);
     IRBuilder<> B(BB);
-    auto *SlotA = B.CreateAlloca(V, nullptr, "a.slot");
-    auto *SlotB = B.CreateAlloca(V, nullptr, "b.slot");
-    auto *SlotR = B.CreateAlloca(V, nullptr, "r.slot");
-    B.CreateStore(boxInt(B, V, Fn->getArg(0)), SlotA);
-    B.CreateStore(boxInt(B, V, Fn->getArg(1)), SlotB);
-    auto *C = B.CreateCall(M->getFunction("py_add"), {SlotR, SlotA, SlotB});
-    C->addParamAttr(0, SretAttr);
-    Value *Payload = B.CreateLoad(I64, B.CreateStructGEP(V, SlotR, 1), "r.i");
+    auto *ValA = boxInt(B, V, Fn->getArg(0));
+    auto *ValB = boxInt(B, V, Fn->getArg(1));
+    auto *RetVal = B.CreateCall(M->getFunction("py_add"), {ValA, ValB}, "r");
+    Value *Payload = B.CreateExtractValue(RetVal, 1, "r.i");
     B.CreateRet(Payload);
   }
 
@@ -124,7 +113,7 @@ int main(int argc, char **argv) {
   // 会一起丢掉,那样就只能看到"什么都没有"。
   std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-  const char *RuntimeDll = (argc > 1) ? argv[1] : "libpylite_runtime.dll";
+  const char *RuntimeDll = (argc > 1) ? argv[1] : "libpylite_runtime.so";
 
   std::printf("=== JIT spike ===\n");
   std::printf("runtime dll: %s\n", RuntimeDll);

@@ -5,23 +5,22 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 可执行文件和 DLL 都放到同一个 bin/ 下,这样 exe 能找到 pylite_runtime.dll,
-# 不用额外配置 PATH。
+# Linux 上 ld 默认 --as-needed，会把 .o 之前出现的 .so 跳过，
+# 导致 pylitec 产出的 .o 找不到运行时符号。强制 --no-as-needed。
+if(UNIX AND NOT APPLE)
+  add_link_options(-Wl,--no-as-needed)
+endif()
+
+# Linux 适配：可执行文件和 .so 都放到同一个 bin/ 下
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-if(NOT WIN32)
-  message(FATAL_ERROR "PyLite 目前只针对 Windows/MinGW 构建")
-endif()
 
 # ---------------------------------------------------------------------------
 # LLVM
 # ---------------------------------------------------------------------------
-# 这个 MSYS2 包是 shared 模式(llvm-config --shared-mode 返回 shared),
-# 所以 LLVMConfig.cmake 导出了一个名为 `LLVM` 的 imported target,
-# 指向 libLLVM-22.dll。链接它就够了,不需要枚举组件 —— 枚举组件名在这种
-# 配置下反而容易写错(LLVM 22 的组件名全小写,且 native/nativecodegen 是别名)。
-find_package(LLVM REQUIRED CONFIG)
+# Linux 上 LLVM 22 也是 shared 模式，LLVMConfig.cmake 导出 `LLVM` target
+# 指向 libLLVM-22.so。链接它就够了。
+find_package(LLVM REQUIRED CONFIG HINTS /usr/lib/llvm-22/lib/cmake/llvm)
 message(STATUS "找到 LLVM ${LLVM_PACKAGE_VERSION} (${LLVM_DIR})")
 
 # LLVM_DEFINITIONS 是带空格的字符串,含 -D 前缀,要用 add_compile_options
@@ -32,13 +31,8 @@ add_compile_options(${LLVM_DEFINITIONS_LIST})
 # ---------------------------------------------------------------------------
 # 运行时库
 # ---------------------------------------------------------------------------
-# 必须是 SHARED(DLL),不能是静态库。原因:JIT 生成的代码要在运行时
-# 解析 py_add 这类符号,而 Windows 上 MinGW 链接出的 exe 几乎不导出任何
-# 符号,"搜索当前进程导出符号"这条路走不通。做成 DLL 后用
-# EPCDynamicLibrarySearchGenerator::Load 按名字显式加载即可。
-#
-# 刻意不加 __declspec(dllexport):MinGW 对 -shared 库默认自动导出全部符号,
-# 一旦出现第一个 dllexport,后续符号就不再自动导出,反而会漏掉一批。
+# Linux 上使用 SHARED(.so)，JIT 生成的代码通过 dlsym 解析运行时符号。
+# GCC/Clang 对 -shared 默认导出全部符号，无需额外标注。
 add_library(pylite_runtime SHARED
   runtime/error.cpp
   runtime/gc.cpp
@@ -50,10 +44,21 @@ add_library(pylite_runtime SHARED
   runtime/index.cpp
   runtime/method.cpp
   runtime/io.cpp
+  runtime/docker.cpp
+  runtime/llm.cpp
+  runtime/cuda.cpp
+  runtime/fusion.cpp
+  runtime/inference.cpp
+  runtime/tokenizer.cpp
+  runtime/server.cpp
+  runtime/quantize.cpp
 )
 target_include_directories(pylite_runtime PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+# Linux 上 GCC 默认隐藏符号，需要显式设置默认可见性以匹配 MinGW 行为
+target_compile_options(pylite_runtime PRIVATE -fvisibility=default)
+target_link_libraries(pylite_runtime PRIVATE pthread dl)
 
 # ---------------------------------------------------------------------------
 # 前端(词法 / 语法 / AST)—— 不依赖 LLVM

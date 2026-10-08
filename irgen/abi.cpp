@@ -78,7 +78,8 @@ void Abi::storeInt(IRBuilder<> &B, Value *slot, int64_t v) {
 
 void Abi::storeFloat(IRBuilder<> &B, Value *slot, double v) {
   // payload 字段在 LLVM 侧是 i64,所以要按位重新解释 double
-  const uint64_t bits = std::bit_cast<uint64_t>(v);
+  uint64_t bits;
+  memcpy(&bits, &v, sizeof(bits));
   B.CreateStore(packAggregate(B, ConstantInt::get(i32Ty_, PY_FLOAT),
                               ConstantInt::get(i64Ty_, bits)),
                 slot);
@@ -148,78 +149,87 @@ Function *Abi::getOrDeclare(StringRef name, FunctionType *ft, bool hasSret) {
 }
 
 Function *Abi::declareBinRet(StringRef name) {
-  // void @name(ptr sret(%PyValue), ptr %a, ptr %b)
+  // Linux System V ABI: %PyValue @name(%PyValue %a, %PyValue %b)
+  // LLVM 自动将 {i32,i64} 拆分为寄存器对 (rdi,rsi) 和 (rdx,rcx)
   return getOrDeclare(name,
-                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, ptrTy_}, false),
-                      /*hasSret=*/true);
+                      FunctionType::get(valueTy_, {valueTy_, valueTy_}, false),
+                      /*hasSret=*/false);
 }
 
 Function *Abi::declareUnaryRet(StringRef name) {
-  // void @name(ptr sret(%PyValue), ptr %a)
-  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_, ptrTy_}, false),
-                      /*hasSret=*/true);
+  // Linux: %PyValue @name(%PyValue %a)
+  return getOrDeclare(name, FunctionType::get(valueTy_, {valueTy_}, false),
+                      /*hasSret=*/false);
 }
 
 Function *Abi::declareUnaryPred(StringRef name) {
-  // i32 @name(ptr %a)  —— 谓词返回 i32 而非 i1,见 value.h
-  return getOrDeclare(name, FunctionType::get(i32Ty_, {ptrTy_}, false),
+  // i32 @name(%PyValue %a)  —— 谓词返回 i32 而非 i1,见 value.h
+  return getOrDeclare(name, FunctionType::get(i32Ty_, {valueTy_}, false),
                       /*hasSret=*/false);
 }
 
 Function *Abi::declareUnaryI64(StringRef name) {
-  // i64 @name(ptr %a)
-  return getOrDeclare(name, FunctionType::get(i64Ty_, {ptrTy_}, false),
+  // py_len 接收指针参数，py_to_int 按值接收 PyValue
+  if (name == "py_len") {
+    return getOrDeclare(name, FunctionType::get(i64Ty_, {ptrTy_}, false),
+                        /*hasSret=*/false);
+  }
+  return getOrDeclare(name, FunctionType::get(i64Ty_, {valueTy_}, false),
                       /*hasSret=*/false);
 }
 
 Function *Abi::declareNullaryRet(StringRef name) {
-  // void @name(ptr sret(%PyValue))
-  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_}, false),
-                      /*hasSret=*/true);
+  // Linux: %PyValue @name()
+  return getOrDeclare(name, FunctionType::get(valueTy_, {}, false),
+                      /*hasSret=*/false);
 }
 
 Function *Abi::declarePtrI64Ret(StringRef name) {
-  // void @name(ptr sret(%PyValue), ptr, i64)
+  // Linux: %PyValue @name(ptr, i64)  —— ptr/i64 参数不受聚合体规则影响
   return getOrDeclare(name,
-                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, i64Ty_}, false),
-                      /*hasSret=*/true);
+                      FunctionType::get(valueTy_, {ptrTy_, i64Ty_}, false),
+                      /*hasSret=*/false);
 }
 
 Value *Abi::callBinary(IRBuilder<> &B, StringRef fn, Value *a, Value *b) {
   Function *f = declareBinRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
-  CallInst *call = B.CreateCall(f, {ret, a, b});
-  // 属性不会自动从声明传播到调用点,必须再标一次
-  call->addParamAttr(0, sretAttr_);
+  // 从栈槽 load 出 PyValue 值，按值传递给运行时函数
+  Value *va = B.CreateLoad(valueTy_, a);
+  Value *vb = B.CreateLoad(valueTy_, b);
+  Value *val = B.CreateCall(f, {va, vb}, (Twine(fn) + ".r").str());
+  B.CreateStore(val, ret);
   return ret;
 }
 
 Value *Abi::callUnary(IRBuilder<> &B, StringRef fn, Value *a) {
   Function *f = declareUnaryRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
-  CallInst *call = B.CreateCall(f, {ret, a});
-  call->addParamAttr(0, sretAttr_);
+  Value *va = B.CreateLoad(valueTy_, a);
+  Value *val = B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
+  B.CreateStore(val, ret);
   return ret;
 }
 
 Value *Abi::callPredicate(IRBuilder<> &B, StringRef fn, Value *a) {
   Function *f = declareUnaryPred(fn);
-  return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
+  Value *va = B.CreateLoad(valueTy_, a);
+  return B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
 }
 
 Value *Abi::callNullary(IRBuilder<> &B, StringRef fn) {
   Function *f = declareNullaryRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
-  CallInst *call = B.CreateCall(f, {ret});
-  call->addParamAttr(0, sretAttr_);
+  Value *val = B.CreateCall(f, {}, (Twine(fn) + ".r").str());
+  B.CreateStore(val, ret);
   return ret;
 }
 
 Value *Abi::callPtrI64(IRBuilder<> &B, StringRef fn, Value *p, Value *i) {
   Function *f = declarePtrI64Ret(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
-  CallInst *call = B.CreateCall(f, {ret, p, i});
-  call->addParamAttr(0, sretAttr_);
+  Value *val = B.CreateCall(f, {p, i}, (Twine(fn) + ".r").str());
+  B.CreateStore(val, ret);
   return ret;
 }
 
@@ -239,22 +249,14 @@ void Abi::callUnpack(IRBuilder<> &B, Value *tupleSlot, Value *outArray, int64_t 
 
 Value *Abi::callN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
                   ArrayRef<Value *> args) {
-  SmallVector<Type *, 8> tys;
-  tys.reserve(paramTypes.size() + 1);
-  tys.push_back(ptrTy_);  // sret 槽位
-  tys.append(paramTypes.begin(), paramTypes.end());
-
-  Function *f = getOrDeclare(fn, FunctionType::get(voidTy_, tys, false),
-                             /*hasSret=*/true);
+  // callN 用于 py_slice/py_call_method 等接收指针参数的函数，
+  // 参数已经是栈槽指针，直接传递即可
+  Function *f = getOrDeclare(fn, FunctionType::get(valueTy_, paramTypes, false),
+                             /*hasSret=*/false);
 
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
-  SmallVector<Value *, 8> callArgs;
-  callArgs.reserve(args.size() + 1);
-  callArgs.push_back(ret);
-  callArgs.append(args.begin(), args.end());
-
-  CallInst *call = B.CreateCall(f, callArgs);
-  call->addParamAttr(0, sretAttr_);
+  Value *val = B.CreateCall(f, args, (Twine(fn) + ".r").str());
+  B.CreateStore(val, ret);
   return ret;
 }
 
@@ -272,8 +274,14 @@ Value *Abi::truthyAsI1(IRBuilder<> &B, Value *slot) {
 }
 
 Value *Abi::callUnaryI64(IRBuilder<> &B, StringRef fn, Value *a) {
+  // py_to_int 按值接收 PyValue，py_len 按指针接收
+  // 通过函数名区分：py_len 传指针，其余传值
   Function *f = declareUnaryI64(fn);
-  return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
+  if (fn == "py_len") {
+    return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
+  }
+  Value *va = B.CreateLoad(valueTy_, a);
+  return B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
 }
 
 void Abi::emitRuntimeError(IRBuilder<> &B, const Twine &msg) {

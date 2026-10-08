@@ -227,4 +227,118 @@ PyValue py_iter_at(const PyValue *obj, int64_t i);
 PyValue py_call_method(const PyValue *obj, const char *name, int64_t nameLen,
                        PyValue *args, int64_t nargs);
 
+// --- Docker 容器调用 -----------------------------------------------------
+// 通过 popen 调用 docker CLI，不引入额外依赖。
+// 部署到有 Docker daemon 的环境中即可直接使用。
+PyValue py_docker_run(const PyValue *image, const PyValue *cmd);
+PyValue py_docker_ps();
+void py_docker_stop(const PyValue *containerId);
+PyValue py_docker_logs(const PyValue *containerId);
+PyValue py_docker_pull(const PyValue *image);
+
+// Docker 项目封装
+PyValue py_docker_generate_dockerfile(const PyValue *baseImage,
+                                       const PyValue *projectName,
+                                       const PyValue *setupCommands,
+                                       const PyValue *entrypoint,
+                                       const PyValue *exposePort);
+PyValue py_docker_build(const PyValue *dockerfile, const PyValue *imageName,
+                         const PyValue *tag, const PyValue *contextDir);
+PyValue py_docker_push(const PyValue *imageName, const PyValue *tag,
+                        const PyValue *registry);
+PyValue py_docker_project_package(const PyValue *projectDir,
+                                   const PyValue *imageName,
+                                   const PyValue *tag,
+                                   const PyValue *baseImage,
+                                   const PyValue *setupCommands,
+                                   const PyValue *entrypoint,
+                                   const PyValue *exposePort);
+
+// --- LLM 神经网络接口 -----------------------------------------------------
+// 通过 curl 调用 OpenAI 兼容 API，支持网络结构描述与修改。
+PyValue py_llm_chat(const PyValue *prompt, const PyValue *systemPrompt,
+                    const PyValue *model, const PyValue *apiKey,
+                    const PyValue *endpoint);
+PyValue py_llm_create_network(const PyValue *name, const PyValue *layers);
+PyValue py_llm_add_layer(const PyValue *network, const PyValue *layer);
+PyValue py_llm_remove_layer(const PyValue *network, const PyValue *index);
+PyValue py_llm_network_summary(const PyValue *network);
+
+// LLM 微调（Fine-tuning）
+PyValue py_llm_create_dataset(const PyValue *examples, const PyValue *systemPrompt);
+PyValue py_llm_upload_file(const PyValue *data, const PyValue *filename,
+                           const PyValue *apiKey, const PyValue *endpoint);
+PyValue py_llm_create_finetune(const PyValue *fileId, const PyValue *model,
+                                const PyValue *suffix, const PyValue *apiKey,
+                                const PyValue *endpoint);
+PyValue py_llm_finetune_status(const PyValue *jobId, const PyValue *apiKey,
+                                const PyValue *endpoint);
+PyValue py_llm_list_finetunes(const PyValue *apiKey, const PyValue *endpoint);
+
+// --- CUDA 编程支持 --------------------------------------------------------
+// 通过 CUDA Driver API 和 LLVM NVPTX 后端实现 GPU 编程。
+// 需要 NVIDIA GPU 和 CUDA 驱动。
+PyValue py_cuda_info();
+PyValue py_cuda_compile_ptx(const PyValue *kernelCode, const PyValue *kernelName);
+PyValue py_cuda_launch_kernel(const PyValue *ptxCode, const PyValue *kernelName,
+                               const PyValue *gridX, const PyValue *gridY,
+                               const PyValue *gridZ, const PyValue *blockX,
+                               const PyValue *blockY, const PyValue *blockZ,
+                               const PyValue *args);
+PyValue py_cuda_alloc(const PyValue *size);
+void py_cuda_free(const PyValue *handle);
+void py_cuda_memcpy_to_device(const PyValue *handle, const PyValue *data);
+PyValue py_cuda_memcpy_from_device(const PyValue *handle, const PyValue *size);
+
+// --- 算子融合优化 ---------------------------------------------------------
+// LLM 推理加速：算子 IR 描述、融合规则引擎、CUDA 内核生成、自动调优。
+PyValue py_fusion_create_graph(const PyValue *name);
+PyValue py_fusion_add_op(const PyValue *graph, const PyValue *opType,
+                          const PyValue *opName, const PyValue *params);
+PyValue py_fusion_apply_rules(const PyValue *graph);
+PyValue py_fusion_generate_kernel(const PyValue *fusedOp, const PyValue *config);
+PyValue py_fusion_autotune(const PyValue *opType, const PyValue *M,
+                            const PyValue *N, const PyValue *K);
+PyValue py_fusion_compile_and_run(const PyValue *kernelCode,
+                                   const PyValue *kernelName,
+                                   const PyValue *M, const PyValue *N,
+                                   const PyValue *K);
+PyValue py_fusion_benchmark(const PyValue *kernelCode, const PyValue *kernelName,
+                             const PyValue *M, const PyValue *N,
+                             const PyValue *K, const PyValue *iterations);
+
+// --- LLM 推理运行时 -------------------------------------------------------
+// 模型加载、Token 生成、KV Cache 管理、FlashAttention、多 GPU、性能分析。
+PyValue py_inference_load_model(const PyValue *modelPath, const PyValue *configPath);
+PyValue py_inference_generate(const PyValue *prompt, const PyValue *maxTokens,
+                               const PyValue *temperature, const PyValue *topP,
+                               const PyValue *topK);
+PyValue py_inference_kv_cache_stats();
+PyValue py_inference_flash_attention_kernel();
+PyValue py_inference_multi_gpu_info();
+PyValue py_inference_profile();
+void py_inference_unload();
+
+// --- Tokenizer 分词器 -----------------------------------------------------
+// BPE 编码/解码，支持 HuggingFace tokenizer.json 格式。
+PyValue py_tokenizer_load(const PyValue *path);
+PyValue py_tokenizer_encode(const PyValue *text);
+PyValue py_tokenizer_decode(const PyValue *tokenIds);
+PyValue py_tokenizer_info();
+
+// --- REST API 服务 --------------------------------------------------------
+// OpenAI 兼容的 HTTP 推理接口，零外部依赖。
+PyValue py_server_start(const PyValue *port);
+void py_server_stop();
+PyValue py_server_status();
+
+// --- 模型量化工具与多架构支持 ---------------------------------------------
+// FP16→AWQ 4-bit 转换、主流架构配置模板、量化精度验证。
+PyValue py_quantize_fp16_to_awq(const PyValue *weightsJson, const PyValue *bits,
+                                 const PyValue *groupSize);
+PyValue py_quantize_arch_template(const PyValue *archName);
+PyValue py_quantize_verify_precision(const PyValue *fp16Values,
+                                      const PyValue *awqValues);
+PyValue py_quantize_model_info(const PyValue *modelPath);
+
 }  // extern "C"

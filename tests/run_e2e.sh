@@ -3,8 +3,8 @@
 # ctest 里有等价的自动化版本(见 CMakeLists.txt),这个脚本用于快速迭代。
 set -u
 
-ROOT=/d/pylite
-OUT=/d/tmp/pylite-e2e
+ROOT=/root/autodl-tmp/llvm-project/llvm
+OUT=/tmp/pylite-e2e
 mkdir -p "$OUT"
 
 pass=0
@@ -16,7 +16,7 @@ for pys in "$ROOT"/tests/e2e/*.pys; do
   drv="$OUT/${name}_main.cpp"
   exe="$OUT/$name.exe"
 
-  if ! "$ROOT/build/bin/pylitec.exe" "$pys" -o "$obj" > "$OUT/$name.log" 2>&1; then
+  if ! "$ROOT/build/bin/pylitec" "$pys" -o "$obj" > "$OUT/$name.log" 2>&1; then
     echo "=== $name: 编译失败 ==="
     cat "$OUT/$name.log"
     fail=$((fail + 1))
@@ -27,8 +27,8 @@ for pys in "$ROOT"/tests/e2e/*.pys; do
   printf 'extern "C" void pylite_%s_main();\nint main(){ pylite_%s_main(); return 0; }\n' \
     "$name" "$name" > "$drv"
 
-  if ! g++ -std=c++20 "$drv" "$obj" -o "$exe" \
-        -L"$ROOT/build/bin" -lpylite_runtime 2> "$OUT/$name.link.log"; then
+  if ! clang++-22 -std=c++20 "$drv" "$obj" -o "$exe" \
+        -L"$ROOT/build/bin" -lpylite_runtime -Wl,-rpath,"$ROOT/build/bin" 2> "$OUT/$name.link.log"; then
     echo "=== $name: 链接失败 ==="
     cat "$OUT/$name.link.log"
     fail=$((fail + 1))
@@ -36,7 +36,11 @@ for pys in "$ROOT"/tests/e2e/*.pys; do
   fi
 
   echo "--- $name ---"
-  PATH="$ROOT/build/bin:$PATH" "$exe"
+  if [ -f "$ROOT/tests/e2e/$name.in" ]; then
+    PATH="$ROOT/build/bin:$PATH" "$exe" < "$ROOT/tests/e2e/$name.in"
+  else
+    PATH="$ROOT/build/bin:$PATH" "$exe"
+  fi
   echo "    (退出码 $?)"
   pass=$((pass + 1))
 done
