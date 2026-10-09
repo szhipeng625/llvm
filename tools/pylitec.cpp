@@ -28,7 +28,8 @@ void usage() {
                "\n"
                "  -I <名称>        指定模块名(默认取输入文件的主文件名)\n"
                "  --emit-ir <路径> 同时把 LLVM IR 文本写出来,便于检查代码生成\n"
-               "  --trace          插入运行时插桩:函数计时/变量上报,经 SSE(18900) 推送并落盘\n");
+               "  --trace          (默认开启)插入运行时插桩:函数计时/变量上报,经 SSE(18900) 推送并落盘\n"
+               "  --no-trace       关闭插桩(正式压测时用)\n");
 }
 
 // 从 "path/to/foo.pys" 取出 "foo"
@@ -45,7 +46,7 @@ std::string moduleNameFromPath(const std::string &path) {
 int main(int argc, char **argv) {
   std::string input, output, emitIRPath, moduleName;
   bool haveOutput = false;
-  bool trace = false;
+  bool trace = true;  // 默认开启 trace,--no-trace 关闭
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -61,6 +62,8 @@ int main(int argc, char **argv) {
       emitIRPath = argv[i];
     } else if (a == "--trace") {
       trace = true;
+    } else if (a == "--no-trace") {
+      trace = false;
     } else if (a == "-h" || a == "--help") {
       usage();
       return 0;
