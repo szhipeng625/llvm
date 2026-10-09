@@ -3,6 +3,14 @@
 #include <cstring>
 #include <sstream>
 
+extern "C" void py_trace_op(const char *category, const char *op,
+                            const char *detail, int ok, int64_t elapsed);
+extern "C" int32_t py_trace_enabled();
+#include <chrono>
+static int64_t traceNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 extern "C" {
 
 // ============================================================================
@@ -135,7 +143,9 @@ PyValue py_cluster_exec(const char *name, int64_t nameLen,
     std::string t(cmd_type, typeLen);
     std::string p(payload, payloadLen);
 
+    int64_t t0_ = traceNowMs();
     auto result = ClusterManager::instance().exec(n, t, p);
+    if (py_trace_enabled()) { std::string d_ = n + "/" + t; py_trace_op("cluster", "exec", d_.c_str(), result.success ? 1 : 0, traceNowMs() - t0_); }
 
     std::ostringstream json;
     json << "{";

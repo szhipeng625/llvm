@@ -1,4 +1,9 @@
 #include "raft.h"
+#include <chrono>
+static int64_t raftTraceNowMs(){
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 #include "../include/pylite/runtime.h"
 #include <cstring>
 #include <sstream>
@@ -73,7 +78,9 @@ PyValue py_raft_build(const char *config_json, int64_t jsonLen) {
         return py_str_new("{\"error\":\"node_id is required\"}", 27);
     }
 
+    int64_t bt_ = raftTraceNowMs();
     RaftNode* node = RaftNode::build(config);
+    if (py_trace_enabled()) py_trace_op("raft", "build", config.node_id.c_str(), node ? 1 : 0, raftTraceNowMs() - bt_);
     if (!node) {
         return py_str_new("{\"error\":\"build failed\"}", 22);
     }

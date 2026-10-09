@@ -16,6 +16,9 @@
 #include "pylite/runtime.h"
 
 #include <chrono>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -207,12 +210,28 @@ void *serverThread(void *) {
 const char *g_traceDumpPath = nullptr;
 FILE *g_traceDump = nullptr;
 
+// 触发机器标识:所有 trace 事件自动带上来源主机名
+static const std::string &machineTag() {
+  static std::string name = [] {
+    char buf[256] = {0};
+    if (gethostname(buf, sizeof(buf) - 1) == 0) return std::string(buf);
+    return std::string("unknown");
+  }();
+  return name;
+}
+
 void pushEvent(const std::string &json) {
   if (!g_traceEnabled) return;
+  std::string tagged;
+  if (!json.empty() && json[0] == 0x7b) {
+    tagged = "{\"machine\":\"" + machineTag() + "\"," + json.substr(1);
+  } else {
+    tagged = json;
+  }
   traceLock();
-  g_events.push_back({json});
+  g_events.push_back({tagged});
   if (g_traceDump) {
-    std::fprintf(g_traceDump, "data: %s\n\n", json.c_str());
+    std::fprintf(g_traceDump, "data: %s\n\n", tagged.c_str());
     std::fflush(g_traceDump);
   }
   traceUnlock();
