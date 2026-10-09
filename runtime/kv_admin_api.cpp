@@ -357,8 +357,23 @@ static std::mutex g_kv_iter_mutex;
 
 extern "C" {
 
+// 迭代器实例的 next 方法处理:for 迭代协议经实例方法分派表路由到这里
+static PyValue kv_iter_next_method(const PyValue *inst, PyValue *args, int64_t nargs) {
+    (void)args; (void)nargs;
+    return py_kv_iter_next(inst);
+}
+
+static void ensure_iter_methods_registered() {
+    static std::once_flag flag;
+    std::call_once(flag, [] {
+        py_instance_register_method("kv_iter", 7, "next", 4, kv_iter_next_method);
+        py_instance_register_method("kv_iter_live", 12, "next", 4, kv_iter_next_method);
+    });
+}
+
 // kv.iter() → 创建节点迭代器实例(快照当前节点列表)
 PyValue py_kv_iter() {
+    ensure_iter_methods_registered();
     auto nodes = KvAdmin::instance().list_nodes();
     std::lock_guard<std::mutex> lk(g_kv_iter_mutex);
     int64_t handle = g_kv_iter_next_handle++;
@@ -420,6 +435,7 @@ PyValue py_kv_iter_rewind(const PyValue* it) {
 // 与 kv.iter 的快照语义互补:迭代期间节点的增删立即可见,
 // 代价是每次 next 都要拿一次管理器锁。
 PyValue py_kv_iter_live() {
+    ensure_iter_methods_registered();
     std::lock_guard<std::mutex> lk(g_kv_iter_mutex);
     int64_t handle = g_kv_iter_next_handle++;
     KvIterState st;   // items 留空,作为 live 标记

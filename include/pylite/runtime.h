@@ -674,4 +674,10 @@ PyValue py_kv_iter_destroy(const PyValue *it);
 PyValue py_server_config(const PyValue *secret, const PyValue *node_id);
 // kv.iter_live():实时迭代器,next 时实时查询节点列表
 PyValue py_kv_iter_live();
+
+// 实例方法类型化注册(迭代协议分派入口)
+typedef PyValue (*PyInstanceMethodFn)(const PyValue *inst, PyValue *args, int64_t nargs);
+void py_instance_register_method(const char *type_name, int64_t typeLen,
+                                 const char *method, int64_t mLen,
+                                 PyInstanceMethodFn fn);
 }  // extern "C"

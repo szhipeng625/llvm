@@ -1,4 +1,5 @@
 #include "irgen.h"
+#include "pylite/value.h"
 
 #include "frontend/lexer.h"  // SourceError
 
@@ -1132,11 +1133,27 @@ void IRGen::genWhile(const While *s) {
 }
 
 void IRGen::genFor(const For *s) {
-  // range(...) 直接降成计数循环;其余可迭代对象(列表/字符串/字典)走通用路径。
+  // range(...) 直接降成计数循环;实例对象(迭代器协议)走 next() 路径;
+  // 其余可迭代对象(列表/字符串/字典)走通用计数路径。
   if (auto *r = dynamic_cast<const RangeExpr *>(s->iterable.get())) {
     return genForRange(s, r);
   }
-  return genForIterable(s);
+  // 迭代目标只求值一次存进槽位,两个分支共用
+  Value *probe = genExpr(s->iterable.get());
+  Value *probeSlot = abi_.newSlot(B_, "for.probe");
+  abi_.copySlot(B_, probeSlot, probe);
+  Value *tag = abi_.loadTag(B_, probeSlot);
+  Value *isInst = B_.CreateICmpEQ(tag, ConstantInt::get(abi_.i32Ty(), PY_INSTANCE), "is.inst");
+  Function *fn = curFn_;
+  BasicBlock *iterBB = BasicBlock::Create(Ctx_, "for.iterproto", fn);
+  BasicBlock *countBB = BasicBlock::Create(Ctx_, "for.count", fn);
+  BasicBlock *mergeBB = BasicBlock::Create(Ctx_, "for.done", fn);
+  B_.CreateCondBr(isInst, iterBB, countBB);
+  B_.SetInsertPoint(iterBB);
+  genForIteratorProtocol(s, probeSlot, mergeBB);
+  B_.SetInsertPoint(countBB);
+  genForIterableFromSlot(s, probeSlot, mergeBB);
+  B_.SetInsertPoint(mergeBB);
 }
 
 // for x in <list|str|dict> —— 降成"下标从 0 数到 len"的计数循环。
@@ -1148,12 +1165,9 @@ void IRGen::genFor(const For *s) {
 //     重新赋值不该改变正在遍历的东西(Python 的迭代器在进入循环时就绑定了)。
 //   * 长度在**条件里每轮重读**。于是循环体里 append 进去的元素也会被遍历到,
 //     这也正是 Python 的行为。
-void IRGen::genForIterable(const For *s) {
+void IRGen::genForIterableFromSlot(const For *s, Value *seq, BasicBlock *mergeBB) {
   Function *fn = curFn_;
 
-  Value *src = genExpr(s->iterable.get());
-  Value *seq = abi_.newSlot(B_, "for.seq");
-  abi_.copySlot(B_, seq, src);   // 绑定一份,后面重新赋值变量不影响它
   BasicBlock *preBB = B_.GetInsertBlock();
 
   BasicBlock *condBB = BasicBlock::Create(Ctx_, "for.cond", fn);
@@ -1186,8 +1200,41 @@ void IRGen::genForIterable(const For *s) {
   B_.CreateBr(condBB);
 
   B_.SetInsertPoint(exitBB);
+  B_.CreateBr(mergeBB);
 }
 
+// 迭代器协议:for x in <实例> —— 每轮调用 next(),返回 None 时终止循环。
+// 与 Python 的迭代协议同构,只是方法名固定为 next(语言的属性调用走统一分派)。
+void IRGen::genForIteratorProtocol(const For *s, Value *itObj, BasicBlock *mergeBB) {
+  Function *fn = curFn_;
+  BasicBlock *condBB = BasicBlock::Create(Ctx_, "ip.cond", fn);
+  BasicBlock *bodyBB = BasicBlock::Create(Ctx_, "ip.body", fn);
+  BasicBlock *exitBB = BasicBlock::Create(Ctx_, "ip.exit", fn);
+  B_.CreateBr(condBB);
+  B_.SetInsertPoint(condBB);
+  // item = it.next() —— 空参数的方法调用
+  GlobalVariable *mname = B_.CreateGlobalString("next");
+  Value *nullArgs = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+  Value *item = abi_.callN(
+      B_, "py_call_method",
+      {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty(), abi_.ptrTy(), abi_.i64Ty()},
+      {itObj, mname, B_.getInt64(4), nullArgs, B_.getInt64(0)});
+  // item 是槽位指针,取 tag 判 None
+  Value *tag = abi_.loadTag(B_, item);
+  Value *isNone = B_.CreateICmpEQ(tag, ConstantInt::get(abi_.i32Ty(), PY_NULL), "is.none");
+  B_.CreateCondBr(isNone, exitBB, bodyBB);
+  B_.SetInsertPoint(bodyBB);
+  AllocaInst *ivar = lookupVar(s->var);
+  if (!ivar) ivar = declareVar(s->var);
+  abi_.copySlot(B_, ivar, item);
+  // 迭代器循环没有 latch:next 调用本身就在 cond 里,continue 直接回 cond
+  loops_.push_back({condBB, exitBB});
+  genBlock(s->body);
+  loops_.pop_back();
+  if (!B_.GetInsertBlock()->getTerminator()) B_.CreateBr(condBB);
+  B_.SetInsertPoint(exitBB);
+  B_.CreateBr(mergeBB);
+}
 // for i in range(a, b, step) 降成带 PHI 的计数循环,不构造任何迭代器对象。
 //
 //   stepOk: 检查 step != 0

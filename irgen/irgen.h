@@ -88,7 +88,10 @@ class IRGen {
   void genWhile(const While *s);
   void genFor(const For *s);
   void genForRange(const For *s, const RangeExpr *r);
-  void genForIterable(const For *s);   // 遍历 list / str / dict
+  void genForIterableFromSlot(const For *s, llvm::Value *seq,
+                              llvm::BasicBlock *mergeBB);   // 遍历 list / str / dict
+  void genForIteratorProtocol(const For *s, llvm::Value *itObj,
+                              llvm::BasicBlock *mergeBB);   // 迭代器协议:实例 next()
   void genReturn(const Return *s);
   void genBlock(const std::vector<StmtPtr> &body);
 

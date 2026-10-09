@@ -11,6 +11,9 @@
 // 三个 tag 各有一张表,用 string_view 比名字。方法集合刻意只取常用子集,
 // 文档里列了清单;表里没有的一律给出"XX 没有方法 'yy'"的明确报错。
 #include "pylite/runtime.h"
+#include <map>
+#include <mutex>
+#include <string>
 
 #include <cstdio>
 #include <cstring>
@@ -331,9 +334,53 @@ PyValue dictProjection(const PyValue &d, bool wantKeys, bool wantVals) {
 
 }  // namespace
 
+// ---- 实例方法类型化注册表(迭代协议等实例方法的分派入口) ----
+// 按 (类型名, 方法名) 注册处理函数。迭代器等内置实例在创建处注册方法,
+// py_call_method 遇到 PY_INSTANCE 时按实例的 type 属性查表分派。
+using InstanceMethodFn = PyValue (*)(const PyValue *inst, PyValue *args, int64_t nargs);
+static std::map<std::string, InstanceMethodFn> g_instance_methods;
+static std::mutex g_instance_methods_mutex;
+
+extern "C" void py_instance_register_method(const char *type_name, int64_t typeLen,
+                                               const char *method, int64_t mLen,
+                                               InstanceMethodFn fn) {
+    std::lock_guard<std::mutex> lk(g_instance_methods_mutex);
+    std::string key = std::string(type_name, typeLen) + "::" + std::string(method, mLen);
+    g_instance_methods[key] = fn;
+}
+
+// 取实例的 type 属性(无则返回空)
+static std::string instanceTypeOf(const PyValue *inst) {
+    PyValue k = py_str_new("type", 4);
+    if (inst->tag != PY_INSTANCE) return "";
+    struct PyInstView { int64_t classId; PyValue attrs; };
+    auto *iv = reinterpret_cast<PyInstView *>(inst->as.ptr);
+    if (!py_dict_has(&iv->attrs, &k)) return "";
+    PyValue t = py_dict_get(&iv->attrs, &k);
+    if (t.tag != PY_STR) return "";
+    return std::string(py_str_data(&t), py_str_size(&t));
+}
+
 extern "C" PyValue py_call_method(const PyValue *obj, const char *name,
                                   int64_t nameLen, PyValue *args, int64_t nargs) {
   const std::string_view m = nm(name, nameLen);
+
+  // ---- 实例对象:查类型化方法注册表 ----
+  if (obj->tag == PY_INSTANCE) {
+    std::string tname = instanceTypeOf(obj);
+    std::string key = tname + "::" + std::string(m);
+    InstanceMethodFn fn = nullptr;
+    {
+      std::lock_guard<std::mutex> lk(g_instance_methods_mutex);
+      auto it = g_instance_methods.find(key);
+      if (it != g_instance_methods.end()) fn = it->second;
+    }
+    if (fn) return fn(obj, args, nargs);
+    static thread_local char ibuf[192];
+    std::snprintf(ibuf, sizeof(ibuf), "'%s' 实例没有方法 '%.*s'",
+                  tname.c_str(), static_cast<int>(nameLen), name);
+    py_runtime_error(ibuf);
+  }
 
   // 便于书写:下标访问比 args[0] 清楚
   auto arg = [&](int64_t i) -> const PyValue & { return args[i]; };
