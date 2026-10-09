@@ -57,6 +57,9 @@ class IRGen {
   llvm::Value *genPrint(const Call *e);                // print(...) 内建
   llvm::Value *genLen(const Call *e);                  // len(...) 内建
   llvm::Value *genGcCollect(const Call *e);            // gc_collect() 内建
+  llvm::Value *genSleepMs(const Call *e);            // sleep_ms(ms) 内建
+  llvm::Value *genTimeMs(const Call *e);             // time_ms() 内建
+  llvm::Value *genTimeS(const Call *e);              // time_s() 内建
   llvm::Value *genMethodCall(const Call *e, const Attribute *attr);  // obj.m(...)
   llvm::Value *genInput(const InputExpr *e);           // input(int, int) 特殊形式
   llvm::Value *genListLit(const ListLit *e);

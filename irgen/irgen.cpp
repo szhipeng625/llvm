@@ -325,6 +325,36 @@ Value *IRGen::genGcCollect(const Call *e) {
   return noneSlot();
 }
 
+// sleep_ms(ms) —— 当前线程休眠指定毫秒数。分布式节点的轮询等待、
+// 心跳间隔控制都要用它。无返回值,与 gc_collect 一样给 None。
+Value *IRGen::genSleepMs(const Call *e) {
+  if (e->args.size() != 1) {
+    irError(e->line, e->col,
+            "sleep_ms() 需要 1 个参数,给了 " + std::to_string(e->args.size()) + " 个");
+  }
+  Value *v = genExpr(e->args[0].get());
+  Value *ms = abi_.callUnaryI64(B_, "py_to_int", v);
+  abi_.callVoidN(B_, "py_sleep_ms", {abi_.i64Ty()}, {ms});
+  return noneSlot();
+}
+
+// time_ms() / time_s() —— 当前 Unix 时间戳。分布式消息的时序控制、
+// 选举超时的基准都靠它。
+Value *IRGen::genTimeMs(const Call *e) {
+  if (!e->args.empty()) {
+    irError(e->line, e->col,
+            "time_ms() 不接受参数,给了 " + std::to_string(e->args.size()) + " 个");
+  }
+  return abi_.callNullary(B_, "py_time_ms");
+}
+Value *IRGen::genTimeS(const Call *e) {
+  if (!e->args.empty()) {
+    irError(e->line, e->col,
+            "time_s() 不接受参数,给了 " + std::to_string(e->args.size()) + " 个");
+  }
+  return abi_.callNullary(B_, "py_time_s");
+}
+
 // obj.method(args) —— 走运行时的统一分派入口。
 //
 // 为什么不在编译期解析成直接调用:本项目的类型注解不做检查,`x.upper()` 里的
@@ -470,17 +500,17 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
   // Sandbox 判题沙箱模块
   if (mod == "sandbox") {
     if (fn == "create") return "py_sandbox_create";
-    if (fn == "set_cpu_limit") return "py_sandbox_set_cpu_limit";
-    if (fn == "set_mem_limit") return "py_sandbox_set_mem_limit";
-    if (fn == "set_max_pids") return "py_sandbox_set_max_pids";
-    if (fn == "set_work_dir") return "py_sandbox_set_work_dir";
-    if (fn == "set_binary") return "py_sandbox_set_binary";
-    if (fn == "add_arg") return "py_sandbox_add_arg";
-    if (fn == "set_stdin") return "py_sandbox_set_stdin";
-    if (fn == "set_stdout") return "py_sandbox_set_stdout";
-    if (fn == "set_stderr") return "py_sandbox_set_stderr";
-    if (fn == "exec") return "py_sandbox_exec";
-    if (fn == "destroy") return "py_sandbox_destroy";
+    if (fn == "set_cpu_limit") return "py_sandbox_set_cpu_limit_v";
+    if (fn == "set_mem_limit") return "py_sandbox_set_mem_limit_v";
+    if (fn == "set_max_pids") return "py_sandbox_set_max_pids_v";
+    if (fn == "set_work_dir") return "py_sandbox_set_work_dir_v";
+    if (fn == "set_binary") return "py_sandbox_set_binary_v";
+    if (fn == "add_arg") return "py_sandbox_add_arg_v";
+    if (fn == "set_stdin") return "py_sandbox_set_stdin_v";
+    if (fn == "set_stdout") return "py_sandbox_set_stdout_v";
+    if (fn == "set_stderr") return "py_sandbox_set_stderr_v";
+    if (fn == "exec") return "py_sandbox_exec_v";
+    if (fn == "destroy") return "py_sandbox_destroy_v";
   }
   // Raft 分布式共识模块（通过 _v 适配器接收 PyValue* 参数）
   if (mod == "raft") {
@@ -496,6 +526,9 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "plugin_load") return "py_raft_plugin_load_v";
     if (fn == "plugin_unload") return "py_raft_plugin_unload_v";
     if (fn == "plugin_list") return "py_raft_plugin_list_v";
+    if (fn == "leader_info") return "py_raft_leader_info_v";
+    if (fn == "send") return "py_raft_send_v";
+    if (fn == "recv") return "py_raft_recv_v";
   }
   // Cluster 集群管理模块（通过 _v 适配器接收 PyValue* 参数）
   if (mod == "cluster") {
@@ -527,6 +560,13 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "bind_sandbox") return "py_kv_bind_sandbox_v";
     if (fn == "get_sandbox") return "py_kv_get_sandbox_v";
     if (fn == "unbind_sandbox") return "py_kv_unbind_sandbox_v";
+    if (fn == "add_box") return "py_kv_add_box_v";
+    if (fn == "locate") return "py_kv_locate_v";
+    if (fn == "self") return "py_kv_self_v";
+    if (fn == "iter") return "py_kv_iter_v";
+    if (fn == "next") return "py_kv_iter_next_v";
+    if (fn == "rewind") return "py_kv_iter_rewind_v";
+    if (fn == "iter_destroy") return "py_kv_iter_destroy_v";
   }
   return nullptr;
 }
@@ -651,6 +691,9 @@ Value *IRGen::genCall(const Call *e) {
   if (name->id == "print") return genPrint(e);
   if (name->id == "len") return genLen(e);
   if (name->id == "gc_collect") return genGcCollect(e);
+  if (name->id == "sleep_ms") return genSleepMs(e);
+  if (name->id == "time_ms") return genTimeMs(e);
+  if (name->id == "time_s") return genTimeS(e);
   // 类名(...) —— 实例化
   if (classMap_.count(name->id)) return genInstanceNew(name->id, e);
 

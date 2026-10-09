@@ -7,16 +7,13 @@
 
 // 从 PyValue 中提取字符串指针和长度
 static const char* strPtr(const PyValue* v) {
-    if (!v) return "";
-    return reinterpret_cast<const char*>(v->as.ptr);
+    if (v->tag != PY_STR) return "";
+    return py_str_data(v);
 }
-
 static int64_t strLen(const PyValue* v) {
-    if (!v) return 0;
-    const char* s = strPtr(v);
-    return s ? static_cast<int64_t>(strlen(s)) : 0;
+    if (v->tag != PY_STR) return 0;
+    return py_str_size(v);
 }
-
 // ====== Raft 适配器 ======
 extern "C" {
 
@@ -205,4 +202,41 @@ PyValue py_kv_unbind_sandbox_v(const PyValue* node_id) {
     return py_int(r);
 }
 
+// ====== 分布式便捷内建适配器(2026-10 增补) ======
+PyValue py_raft_leader_info_v(const PyValue* node_id) {
+    return py_raft_leader_info(strPtr(node_id), strLen(node_id));
+}
+PyValue py_raft_send_v(const PyValue* node_id, const PyValue* msg) {
+    return py_raft_send(strPtr(node_id), strLen(node_id),
+                        strPtr(msg), strLen(msg));
+}
+PyValue py_raft_recv_v(const PyValue* node_id) {
+    return py_raft_recv(strPtr(node_id), strLen(node_id));
+}
+// ====== add(box) 编排与容器内定位适配器(2026-10 增补) ======
+// box 是实例对象,直接透传指针,不走 strPtr 字符串提取
+PyValue py_kv_add_box_v(const PyValue* node_id, const PyValue* box, const PyValue* addr) {
+    return py_kv_add_box(strPtr(node_id), strLen(node_id),
+                         box,
+                         strPtr(addr), strLen(addr));
+}
+PyValue py_kv_locate_v(const PyValue* box) {
+    return py_kv_locate(box);
+}
+PyValue py_kv_self_v() {
+    return py_kv_self();
+}
+// ====== 节点迭代器适配器(2026-10 增补) ======
+PyValue py_kv_iter_v() {
+    return py_kv_iter();
+}
+PyValue py_kv_iter_next_v(const PyValue* it) {
+    return py_kv_iter_next(it);
+}
+PyValue py_kv_iter_rewind_v(const PyValue* it) {
+    return py_kv_iter_rewind(it);
+}
+PyValue py_kv_iter_destroy_v(const PyValue* it) {
+    return py_kv_iter_destroy(it);
+}
 }  // extern "C"

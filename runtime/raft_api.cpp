@@ -321,3 +321,55 @@ PyValue py_raft_plugin_list(const char *node_id, int64_t idLen) {
 }
 
 }  // extern "C"
+
+// ============================================================================
+// 分布式便捷内建:选主查询与节点消息收件箱(2026-10 增补)
+// ============================================================================
+#include <queue>
+#include <map>
+
+// 每个 raft 节点一个简单消息队列(进程内),配合 server /exec 端点投递
+static std::map<std::string, std::queue<std::string>> g_inbox;
+static std::mutex g_inbox_mutex;
+
+extern "C" PyValue py_raft_leader_info(const char *node_id, int64_t idLen) {
+    std::string id(node_id, idLen);
+    auto st = RaftNode::status(id);
+    std::ostringstream json;
+    json << "{";
+    json << "\"node_id\":\"" << st.node_id << "\",";
+    json << "\"role\":\"" << (st.role == RaftRole::LEADER ? "leader" :
+                              st.role == RaftRole::CANDIDATE ? "candidate" : "follower") << "\",";
+    json << "\"leader_id\":\"" << st.leader_id << "\",";
+    json << "\"is_leader\":" << (st.role == RaftRole::LEADER ? "true" : "false") << ",";
+    json << "\"term\":" << st.term;
+    json << "}";
+    std::string s = json.str();
+    return py_str_new(s.c_str(), s.size());
+}
+
+extern "C" PyValue py_raft_send(const char *node_id, int64_t idLen,
+                     const char *msg, int64_t msgLen) {
+    std::string id(node_id, idLen);
+    std::string m(msg, msgLen);
+    {
+        std::lock_guard<std::mutex> lk(g_inbox_mutex);
+        g_inbox[id].push(m);
+    }
+    std::string r = "{\"status\":\"queued\",\"node\":\"" + id + "\"}";
+    return py_str_new(r.c_str(), r.size());
+}
+
+extern "C" PyValue py_raft_recv(const char *node_id, int64_t idLen) {
+    std::string id(node_id, idLen);
+    std::string m;
+    {
+        std::lock_guard<std::mutex> lk(g_inbox_mutex);
+        auto it = g_inbox.find(id);
+        if (it != g_inbox.end() && !it->second.empty()) {
+            m = it->second.front();
+            it->second.pop();
+        }
+    }
+    return py_str_new(m.c_str(), m.size());
+}

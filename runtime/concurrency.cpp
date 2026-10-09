@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 #ifdef _WIN32
@@ -544,4 +546,24 @@ extern "C" PyValue py_sync_stats() {
   std::snprintf(buf, sizeof(buf), "{\"mutexes\":%lld,\"conds\":%lld}",
                 static_cast<long long>(mcount), static_cast<long long>(ccount));
   return py_str_new(buf, static_cast<int64_t>(std::strlen(buf)));
+}
+
+// ============================================================================
+// 分布式便捷内建:休眠与时间(2026-10 增补)
+// ============================================================================
+extern "C" void py_sleep_ms(int64_t ms) {
+  if (ms <= 0) return;
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+extern "C" PyValue py_time_ms() {
+  auto now = std::chrono::system_clock::now().time_since_epoch();
+  int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+  return py_int(ms);
+}
+
+extern "C" PyValue py_time_s() {
+  auto now = std::chrono::system_clock::now().time_since_epoch();
+  int64_t s = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+  return py_int(s);
 }

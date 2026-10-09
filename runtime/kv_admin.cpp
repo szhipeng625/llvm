@@ -62,6 +62,9 @@ int64_t KvAdmin::spawn_process(const KvNode& node, std::string& error) {
     }
 
     if (pid == 0) {
+        // 注入节点身份:容器内代码经 PYLITE_NODE_ID 反查所属节点
+        setenv("PYLITE_NODE_ID", node.node_id.c_str(), 1);
+        setenv("PYLITE_NODE_ADDR", node.addr.c_str(), 1);
         // 子进程：切换工作目录
         if (!node.work_dir.empty() && chdir(node.work_dir.c_str()) != 0) {
             _exit(126);

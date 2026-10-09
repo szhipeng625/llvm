@@ -77,6 +77,15 @@ void py_sandbox_set_work_dir(const PyValue* inst, const char *path, int64_t path
     }
 }
 
+// 按 handle 取盒子登记的二进制路径(供 kv.add_box 使用,2026-10 增补)
+PyValue py_sandbox_binary_path(int64_t handle) {
+    std::lock_guard<std::mutex> lk(g_sandbox_mutex);
+    auto it = g_sandbox_configs.find(handle);
+    if (it == g_sandbox_configs.end()) return py_str_new("", 0);
+    const std::string& p = it->second.user_binary;
+    return py_str_new(p.c_str(), p.size());
+}
+
 void py_sandbox_set_binary(const PyValue* inst, const char *path, int64_t pathLen) {
     int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
@@ -147,4 +156,73 @@ void py_sandbox_destroy(const PyValue* inst) {
     g_sandbox_configs.erase(handle);
 }
 
+}  // extern "C"
+
+// ============================================================================
+// sandbox 模块参数适配器(2026-10 增补)
+// 模块调用统一按 PyValue* 传参,而底层函数签名是 (inst, 标量/char*, len) 混合形式,
+// 直接映射会把 PyValue* 误当成 char* 内容解读(崩溃根因)。
+// 这里补一层适配器,从 PyValue 中正确提取字符串与整数。
+// ============================================================================
+#include "pylite/runtime.h"
+#include "pylite/value.h"
+
+static const char* sb_str(const PyValue* v) {
+    if (!v || v->tag != PY_STR) return "";
+    return py_str_data(v);
+}
+static int64_t sb_len(const PyValue* v) {
+    if (!v || v->tag != PY_STR) return 0;
+    return py_str_size(v);
+}
+static int64_t sb_int(const PyValue* v) {
+    if (!v || v->tag != PY_INT) return 0;
+    return v->as.i;
+}
+
+extern "C" {
+PyValue py_sandbox_set_work_dir_v(const PyValue* inst, const PyValue* path) {
+    py_sandbox_set_work_dir(inst, sb_str(path), sb_len(path));
+    return py_none();
+}
+PyValue py_sandbox_set_binary_v(const PyValue* inst, const PyValue* path) {
+    py_sandbox_set_binary(inst, sb_str(path), sb_len(path));
+    return py_none();
+}
+PyValue py_sandbox_add_arg_v(const PyValue* inst, const PyValue* arg) {
+    py_sandbox_add_arg(inst, sb_str(arg), sb_len(arg));
+    return py_none();
+}
+PyValue py_sandbox_set_stdin_v(const PyValue* inst, const PyValue* path) {
+    py_sandbox_set_stdin(inst, sb_str(path), sb_len(path));
+    return py_none();
+}
+PyValue py_sandbox_set_stdout_v(const PyValue* inst, const PyValue* path) {
+    py_sandbox_set_stdout(inst, sb_str(path), sb_len(path));
+    return py_none();
+}
+PyValue py_sandbox_set_stderr_v(const PyValue* inst, const PyValue* path) {
+    py_sandbox_set_stderr(inst, sb_str(path), sb_len(path));
+    return py_none();
+}
+PyValue py_sandbox_set_cpu_limit_v(const PyValue* inst, const PyValue* ms) {
+    py_sandbox_set_cpu_limit(inst, static_cast<uint32_t>(sb_int(ms)));
+    return py_none();
+}
+PyValue py_sandbox_set_mem_limit_v(const PyValue* inst, const PyValue* bytes) {
+    py_sandbox_set_mem_limit(inst, static_cast<uint64_t>(sb_int(bytes)));
+    return py_none();
+}
+PyValue py_sandbox_set_max_pids_v(const PyValue* inst, const PyValue* n) {
+    py_sandbox_set_max_pids(inst, sb_int(n));
+    return py_none();
+}
+PyValue py_sandbox_exec_v(const PyValue* inst) {
+    int64_t r = py_sandbox_exec(inst);
+    return py_int(r);
+}
+PyValue py_sandbox_destroy_v(const PyValue* inst) {
+    py_sandbox_destroy(inst);
+    return py_none();
+}
 }  // extern "C"

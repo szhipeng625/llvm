@@ -633,4 +633,40 @@ int64_t py_kv_bind_sandbox(const char *node_id, int64_t idLen, int64_t handle);
 int64_t py_kv_get_sandbox(const char *node_id, int64_t idLen);
 int64_t py_kv_unbind_sandbox(const char *node_id, int64_t idLen);
 
+
+// ---- 分布式便捷内建(2026-10 增补) ----
+// sleep_ms(ms):当前线程休眠指定毫秒数
+void py_sleep_ms(int64_t ms);
+// time_ms() / time_s():当前 Unix 时间戳(毫秒 / 秒)
+PyValue py_time_ms();
+PyValue py_time_s();
+// raft 选主查询:返回 {node_id,role,leader_id,is_leader,term}
+PyValue py_raft_leader_info(const char *node_id, int64_t idLen);
+// raft 消息收件箱:send 入队 / recv 出队(空返回空串)
+PyValue py_raft_send(const char *node_id, int64_t idLen,
+                     const char *msg, int64_t msgLen);
+PyValue py_raft_recv(const char *node_id, int64_t idLen);
+
+// ---- add(box) 统一编排与容器内定位(2026-10 增补) ----
+// kv.add_box(node_id, box, addr):一步完成注册节点+绑定盒子,addr 空则本地启动
+PyValue py_kv_add_box(const char *node_id, int64_t idLen,
+                      const PyValue *box,
+                      const char *addr, int64_t addrLen);
+// kv.locate(box):由盒子反查所属 kv 节点的 kv->box 绑定关系
+PyValue py_kv_locate(const PyValue *box);
+// kv.self():容器内定位,读 PYLITE_NODE_ID 环境变量反查所属节点
+PyValue py_kv_self();
+
+// 按 handle 取盒子登记的二进制路径(供 kv.add_box 使用)
+PyValue py_sandbox_binary_path(int64_t handle);
+
+// ---- 节点迭代器适配器(2026-10 增补) ----
+// kv.iter():创建节点迭代器实例(快照当前节点列表)
+PyValue py_kv_iter();
+// kv.next(it):取下一个节点信息,迭代结束返回 None
+PyValue py_kv_iter_next(const PyValue *it);
+// kv.rewind(it):重置游标到开头,返回元素个数
+PyValue py_kv_iter_rewind(const PyValue *it);
+// kv.iter_destroy(it):销毁迭代器释放快照
+PyValue py_kv_iter_destroy(const PyValue *it);
 }  // extern "C"
