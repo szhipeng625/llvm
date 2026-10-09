@@ -144,11 +144,29 @@ std::string buildHttpResponse(int statusCode, const std::string &body,
 // 处理单个 HTTP 请求
 void handleRequest(SSL *ssl, int clientFd) {
   char buffer[8192];
-  ssize_t n = tlsRecv(ssl, buffer, sizeof(buffer) - 1);
-  if (n <= 0) { close(clientFd); return; }
-  buffer[n] = '\0';
-
-  std::string request(buffer, static_cast<size_t>(n));
+  std::string request;
+  // 循环读取直到收齐完整 HTTP 请求:请求头结束 + Content-Length 指定的请求体。
+  // 客户端常把请求头与请求体分多次发送,单次读取会拿到不完整的请求,
+  // 服务端据此提前关闭连接,客户端表现为 Connection reset by peer。
+  while (request.size() < sizeof(buffer) - 1) {
+    size_t room = sizeof(buffer) - 1 - request.size();
+    ssize_t n = tlsRecv(ssl, buffer, static_cast<int>(room));
+    if (n <= 0) break;
+    request.append(buffer, static_cast<size_t>(n));
+    size_t hdrEnd = request.find("\r\n\r\n");
+    if (hdrEnd == std::string::npos) continue;
+    size_t clPos = request.find("Content-Length:");
+    if (clPos != std::string::npos && clPos < hdrEnd) {
+      size_t vStart = clPos + 15;
+      while (vStart < hdrEnd && (request[vStart] == ' ' || request[vStart] == '\t')) vStart++;
+      size_t vEnd = request.find("\r\n", vStart);
+      long cl = std::atol(request.substr(vStart, vEnd - vStart).c_str());
+      if (request.size() >= hdrEnd + 4 + static_cast<size_t>(cl)) break;
+    } else {
+      break;
+    }
+  }
+  if (request.empty()) { close(clientFd); return; }
 
   // 处理 CORS 预检请求
   if (request.find("OPTIONS") == 0) {
@@ -319,15 +337,20 @@ void serverLoop(int port) {
   while (g_serverRunning) {
     int clientFd = accept(serverFd, nullptr, nullptr);
     if (clientFd < 0) continue;
-    if (g_tlsEnabled) {
-      SSL *ssl = tlsAccept(clientFd);
-      handleRequest(ssl, clientFd);
-      SSL_shutdown(ssl);
-      SSL_free(ssl);
-    } else {
-      handleRequest(nullptr, clientFd);
-    }
-    close(clientFd);
+    // 每个连接交给独立线程处理:串行 accept 会让慢连接阻塞后续请求,
+    // 跨地域 TLS 握手较慢时表现为后续连接被对端重置。
+    std::thread([clientFd]() {
+      if (g_tlsEnabled) {
+        SSL *ssl = tlsAccept(clientFd);
+        if (!ssl) return;  // tlsAccept 失败时已关闭 fd
+        handleRequest(ssl, clientFd);
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+      } else {
+        handleRequest(nullptr, clientFd);
+      }
+      close(clientFd);
+    }).detach();
   }
 
   close(serverFd);
