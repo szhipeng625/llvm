@@ -467,6 +467,67 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "reset") return "py_engine_reset";
     if (fn == "serve") return "py_engine_serve";
   }
+  // Sandbox 判题沙箱模块
+  if (mod == "sandbox") {
+    if (fn == "create") return "py_sandbox_create";
+    if (fn == "set_cpu_limit") return "py_sandbox_set_cpu_limit";
+    if (fn == "set_mem_limit") return "py_sandbox_set_mem_limit";
+    if (fn == "set_max_pids") return "py_sandbox_set_max_pids";
+    if (fn == "set_work_dir") return "py_sandbox_set_work_dir";
+    if (fn == "set_binary") return "py_sandbox_set_binary";
+    if (fn == "add_arg") return "py_sandbox_add_arg";
+    if (fn == "set_stdin") return "py_sandbox_set_stdin";
+    if (fn == "set_stdout") return "py_sandbox_set_stdout";
+    if (fn == "set_stderr") return "py_sandbox_set_stderr";
+    if (fn == "exec") return "py_sandbox_exec";
+    if (fn == "destroy") return "py_sandbox_destroy";
+  }
+  // Raft 分布式共识模块（通过 _v 适配器接收 PyValue* 参数）
+  if (mod == "raft") {
+    if (fn == "build") return "py_raft_build_v";
+    if (fn == "erase") return "py_raft_erase_v";
+    if (fn == "status") return "py_raft_status_v";
+    if (fn == "list_nodes") return "py_raft_list_nodes_v";
+    if (fn == "add") return "py_raft_add_v";
+    if (fn == "register_handler") return "py_raft_register_handler_v";
+    if (fn == "register_node") return "py_raft_register_node_v";
+    if (fn == "cluster_nodes") return "py_raft_cluster_nodes_v";
+    if (fn == "mount_storage") return "py_raft_mount_storage_v";
+    if (fn == "plugin_load") return "py_raft_plugin_load_v";
+    if (fn == "plugin_unload") return "py_raft_plugin_unload_v";
+    if (fn == "plugin_list") return "py_raft_plugin_list_v";
+  }
+  // Cluster 集群管理模块（通过 _v 适配器接收 PyValue* 参数）
+  if (mod == "cluster") {
+    if (fn == "connect") return "py_cluster_connect_v";
+    if (fn == "disconnect") return "py_cluster_disconnect_v";
+    if (fn == "list") return "py_cluster_list_v";
+    if (fn == "is_connected") return "py_cluster_is_connected_v";
+    if (fn == "status") return "py_cluster_status_v";
+    if (fn == "nodes") return "py_cluster_nodes_v";
+    if (fn == "health") return "py_cluster_health_v";
+    if (fn == "exec") return "py_cluster_exec_v";
+    if (fn == "query") return "py_cluster_query_v";
+    if (fn == "broadcast") return "py_cluster_broadcast_v";
+    if (fn == "health_all") return "py_cluster_health_all_v";
+  }
+  // KvAdmin 节点生命周期管理模块（通过 _v 适配器接收 PyValue* 参数）
+  if (mod == "kv") {
+    if (fn == "build") return "py_kv_build_v";
+    if (fn == "add") return "py_kv_add_v";
+    if (fn == "erase") return "py_kv_erase_v";
+    if (fn == "skip") return "py_kv_skip_v";
+    if (fn == "sleep") return "py_kv_sleep_v";
+    if (fn == "wakeup") return "py_kv_wakeup_v";
+    if (fn == "stop") return "py_kv_stop_v";
+    if (fn == "restart") return "py_kv_restart_v";
+    if (fn == "status") return "py_kv_status_v";
+    if (fn == "list") return "py_kv_list_v";
+    if (fn == "alive") return "py_kv_alive_v";
+    if (fn == "bind_sandbox") return "py_kv_bind_sandbox_v";
+    if (fn == "get_sandbox") return "py_kv_get_sandbox_v";
+    if (fn == "unbind_sandbox") return "py_kv_unbind_sandbox_v";
+  }
   return nullptr;
 }
 

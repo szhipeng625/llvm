@@ -1,4 +1,5 @@
 #include "sandbox.h"
+#include "../include/pylite/runtime.h"
 #include <unordered_map>
 #include <mutex>
 #include <unistd.h>
@@ -10,16 +11,38 @@ static std::unordered_map<int64_t, SandboxConfig> g_sandbox_configs;
 static std::mutex g_sandbox_mutex;
 static int64_t g_next_handle = 1;
 
+// 沙箱实例的 classId
+static const int64_t SANDBOX_CLASS_ID = 2;
+
 extern "C" {
 
-int64_t py_sandbox_create() {
+// 创建沙箱实例，返回 PY_INSTANCE 对象
+PyValue py_sandbox_create() {
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     int64_t handle = g_next_handle++;
     g_sandbox_configs[handle] = SandboxConfig{};
-    return handle;
+    // 创建属性字典，存入句柄
+    PyValue attrs = py_dict_new(nullptr, nullptr, 0);
+    PyValue k = py_str_new("handle", 6);
+    PyValue v = py_int(handle);
+    py_dict_set(&attrs, &k, &v);
+    // 存入类型名
+    PyValue tk = py_str_new("type", 4);
+    PyValue tv = py_str_new("sandbox", 7);
+    py_dict_set(&attrs, &tk, &tv);
+    return py_instance_new(SANDBOX_CLASS_ID, &attrs);
 }
 
-void py_sandbox_set_cpu_limit(int64_t handle, uint32_t cpu_limit_ms) {
+// 从沙箱实例中提取句柄
+static int64_t get_handle(const PyValue* inst) {
+    if (!inst || inst->tag != 9) return -1;  // PY_INSTANCE = 9
+    PyValue k = py_str_new("handle", 6);
+    PyValue v = py_instance_get_attr(inst, "handle", 6);
+    return py_as_int(v);
+}
+
+void py_sandbox_set_cpu_limit(const PyValue* inst, uint32_t cpu_limit_ms) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -27,7 +50,8 @@ void py_sandbox_set_cpu_limit(int64_t handle, uint32_t cpu_limit_ms) {
     }
 }
 
-void py_sandbox_set_mem_limit(int64_t handle, uint64_t mem_limit_bytes) {
+void py_sandbox_set_mem_limit(const PyValue* inst, uint64_t mem_limit_bytes) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -35,7 +59,8 @@ void py_sandbox_set_mem_limit(int64_t handle, uint64_t mem_limit_bytes) {
     }
 }
 
-void py_sandbox_set_max_pids(int64_t handle, int64_t max_pids) {
+void py_sandbox_set_max_pids(const PyValue* inst, int64_t max_pids) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -43,7 +68,8 @@ void py_sandbox_set_max_pids(int64_t handle, int64_t max_pids) {
     }
 }
 
-void py_sandbox_set_work_dir(int64_t handle, const char *path, int64_t pathLen) {
+void py_sandbox_set_work_dir(const PyValue* inst, const char *path, int64_t pathLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -51,7 +77,8 @@ void py_sandbox_set_work_dir(int64_t handle, const char *path, int64_t pathLen) 
     }
 }
 
-void py_sandbox_set_binary(int64_t handle, const char *path, int64_t pathLen) {
+void py_sandbox_set_binary(const PyValue* inst, const char *path, int64_t pathLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -59,7 +86,8 @@ void py_sandbox_set_binary(int64_t handle, const char *path, int64_t pathLen) {
     }
 }
 
-void py_sandbox_add_arg(int64_t handle, const char *arg, int64_t argLen) {
+void py_sandbox_add_arg(const PyValue* inst, const char *arg, int64_t argLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -67,7 +95,8 @@ void py_sandbox_add_arg(int64_t handle, const char *arg, int64_t argLen) {
     }
 }
 
-void py_sandbox_set_stdin(int64_t handle, const char *path, int64_t pathLen) {
+void py_sandbox_set_stdin(const PyValue* inst, const char *path, int64_t pathLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -75,7 +104,8 @@ void py_sandbox_set_stdin(int64_t handle, const char *path, int64_t pathLen) {
     }
 }
 
-void py_sandbox_set_stdout(int64_t handle, const char *path, int64_t pathLen) {
+void py_sandbox_set_stdout(const PyValue* inst, const char *path, int64_t pathLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -83,7 +113,8 @@ void py_sandbox_set_stdout(int64_t handle, const char *path, int64_t pathLen) {
     }
 }
 
-void py_sandbox_set_stderr(int64_t handle, const char *path, int64_t pathLen) {
+void py_sandbox_set_stderr(const PyValue* inst, const char *path, int64_t pathLen) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     auto it = g_sandbox_configs.find(handle);
     if (it != g_sandbox_configs.end()) {
@@ -91,31 +122,27 @@ void py_sandbox_set_stderr(int64_t handle, const char *path, int64_t pathLen) {
     }
 }
 
-int64_t py_sandbox_exec(int64_t handle) {
+int64_t py_sandbox_exec(const PyValue* inst) {
+    int64_t handle = get_handle(inst);
     SandboxConfig config;
     {
         std::lock_guard<std::mutex> lk(g_sandbox_mutex);
         auto it = g_sandbox_configs.find(handle);
         if (it == g_sandbox_configs.end()) {
-            return -1;  // 无效句柄
+            return -1;
         }
         config = it->second;
     }
-
     pid_t pid = fork();
-    if (pid < 0) {
-        return -1;  // fork 失败
-    }
+    if (pid < 0) return -1;
     if (pid == 0) {
-        // 子进程：进入沙箱并执行用户程序
         sandbox_main(config);
-        // sandbox_main 不返回
     }
-    // 父进程：返回子进程 pid
     return static_cast<int64_t>(pid);
 }
 
-void py_sandbox_destroy(int64_t handle) {
+void py_sandbox_destroy(const PyValue* inst) {
+    int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
     g_sandbox_configs.erase(handle);
 }

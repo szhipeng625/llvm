@@ -449,28 +449,28 @@ void py_trace_op(const char *category, const char *op, const char *detail,
 // 在受控环境中执行用户提交的代码：seccomp 系统调用白名单 + 降权 + 资源限制。
 // 这些接口供 .pys 脚本在编译时通过 IRGen 生成调用，也可在 C++ 侧直接使用。
 
-// 创建沙箱配置句柄，返回整数句柄
-int64_t py_sandbox_create();
+// 创建沙箱实例，返回 PY_INSTANCE 对象
+PyValue py_sandbox_create();
 // 设置 CPU 时间限制（毫秒）
-void py_sandbox_set_cpu_limit(int64_t handle, uint32_t cpu_limit_ms);
+void py_sandbox_set_cpu_limit(const PyValue *inst, uint32_t cpu_limit_ms);
 // 设置内存限制（字节）
-void py_sandbox_set_mem_limit(int64_t handle, uint64_t mem_limit_bytes);
+void py_sandbox_set_mem_limit(const PyValue *inst, uint64_t mem_limit_bytes);
 // 设置最大进程数（防进程炸弹）
-void py_sandbox_set_max_pids(int64_t handle, int64_t max_pids);
+void py_sandbox_set_max_pids(const PyValue *inst, int64_t max_pids);
 // 设置工作目录
-void py_sandbox_set_work_dir(int64_t handle, const char *path, int64_t pathLen);
+void py_sandbox_set_work_dir(const PyValue *inst, const char *path, int64_t pathLen);
 // 设置用户可执行文件路径
-void py_sandbox_set_binary(int64_t handle, const char *path, int64_t pathLen);
+void py_sandbox_set_binary(const PyValue *inst, const char *path, int64_t pathLen);
 // 添加命令行参数
-void py_sandbox_add_arg(int64_t handle, const char *arg, int64_t argLen);
+void py_sandbox_add_arg(const PyValue *inst, const char *arg, int64_t argLen);
 // 设置标准输入/输出/错误重定向文件
-void py_sandbox_set_stdin(int64_t handle, const char *path, int64_t pathLen);
-void py_sandbox_set_stdout(int64_t handle, const char *path, int64_t pathLen);
-void py_sandbox_set_stderr(int64_t handle, const char *path, int64_t pathLen);
+void py_sandbox_set_stdin(const PyValue *inst, const char *path, int64_t pathLen);
+void py_sandbox_set_stdout(const PyValue *inst, const char *path, int64_t pathLen);
+void py_sandbox_set_stderr(const PyValue *inst, const char *path, int64_t pathLen);
 // 执行沙箱（fork + sandbox_main + exec），返回子进程 pid
-int64_t py_sandbox_exec(int64_t handle);
-// 销毁沙箱配置句柄
-void py_sandbox_destroy(int64_t handle);
+int64_t py_sandbox_exec(const PyValue *inst);
+// 销毁沙箱实例
+void py_sandbox_destroy(const PyValue *inst);
 
 // --- cgroup 资源管理 ------------------------------------------------------
 // 基于 Linux cgroup v2 的 CPU/内存/PID 限制与用量监控。
@@ -627,5 +627,10 @@ PyValue py_kv_status(const char *node_id, int64_t idLen);
 PyValue py_kv_list();
 // 节点进程是否存活（1/0）
 int64_t py_kv_alive(const char *node_id, int64_t idLen);
+
+// 沙箱绑定与查找：将沙箱句柄关联到分布式节点
+int64_t py_kv_bind_sandbox(const char *node_id, int64_t idLen, int64_t handle);
+int64_t py_kv_get_sandbox(const char *node_id, int64_t idLen);
+int64_t py_kv_unbind_sandbox(const char *node_id, int64_t idLen);
 
 }  // extern "C"

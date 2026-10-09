@@ -67,6 +67,7 @@ add_library(pylite_runtime SHARED
   runtime/sandbox.cpp
   runtime/cgroup.cpp
   runtime/sandbox_api.cpp
+  runtime/distributed_adapter.cpp
   runtime/cgroup_api.cpp
   runtime/sysmon.cpp
   runtime/sysmon_api.cpp

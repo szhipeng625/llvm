@@ -180,4 +180,34 @@ int64_t py_kv_alive(const char *node_id, int64_t idLen) {
     return KvAdmin::instance().is_alive(id) ? 1 : 0;
 }
 
+// ====== 沙箱绑定与查找 ======
+// 全局映射：节点 ID → 沙箱句柄
+static std::map<std::string, int64_t> g_node_sandbox_map;
+static std::mutex g_node_sandbox_mutex;
+
+// kv.bind_sandbox(node_id, sandbox_handle) → 将沙箱绑定到节点
+int64_t py_kv_bind_sandbox(const char *node_id, int64_t idLen, int64_t handle) {
+    std::string id(node_id, idLen);
+    std::lock_guard<std::mutex> lk(g_node_sandbox_mutex);
+    g_node_sandbox_map[id] = handle;
+    return 1;
+}
+
+// kv.get_sandbox(node_id) → 通过节点 ID 查找绑定的沙箱句柄
+int64_t py_kv_get_sandbox(const char *node_id, int64_t idLen) {
+    std::string id(node_id, idLen);
+    std::lock_guard<std::mutex> lk(g_node_sandbox_mutex);
+    auto it = g_node_sandbox_map.find(id);
+    if (it != g_node_sandbox_map.end()) return it->second;
+    return -1;
+}
+
+// kv.unbind_sandbox(node_id) → 解除节点与沙箱的绑定
+int64_t py_kv_unbind_sandbox(const char *node_id, int64_t idLen) {
+    std::string id(node_id, idLen);
+    std::lock_guard<std::mutex> lk(g_node_sandbox_mutex);
+    g_node_sandbox_map.erase(id);
+    return 1;
+}
+
 }  // extern "C"
