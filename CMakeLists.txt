@@ -33,6 +33,14 @@ add_compile_options(${LLVM_DEFINITIONS_LIST})
 # ---------------------------------------------------------------------------
 # Linux 上使用 SHARED(.so)，JIT 生成的代码通过 dlsym 解析运行时符号。
 # GCC/Clang 对 -shared 默认导出全部符号，无需额外标注。
+# ---------------------------------------------------------------------------
+# 内置分布式项目 adviskv（作为子项目接入构建）
+# ---------------------------------------------------------------------------
+set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/adviskv/.adviskv_deps/vcpkg/installed" CACHE PATH "adviskv vcpkg installed dir")
+list(PREPEND CMAKE_PREFIX_PATH "${VCPKG_INSTALLED_DIR}/x64-linux")
+set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "Disable vcpkg manifest install" FORCE)
+add_subdirectory(third_party/adviskv)
+
 add_library(pylite_runtime SHARED
   runtime/error.cpp
   runtime/gc.cpp
@@ -77,7 +85,7 @@ target_compile_options(pylite_runtime PRIVATE -fvisibility=default)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SECCOMP REQUIRED libseccomp)
 target_include_directories(pylite_runtime PRIVATE ${SECCOMP_INCLUDE_DIRS})
-target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES})
+target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES} adviskv_storage_lib adviskv_catalog_lib adviskv_topo_lib adviskv_sdk)
 
 # ---------------------------------------------------------------------------
 # 前端(词法 / 语法 / AST)—— 不依赖 LLVM
