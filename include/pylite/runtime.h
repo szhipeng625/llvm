@@ -669,4 +669,9 @@ PyValue py_kv_iter_next(const PyValue *it);
 PyValue py_kv_iter_rewind(const PyValue *it);
 // kv.iter_destroy(it):销毁迭代器释放快照
 PyValue py_kv_iter_destroy(const PyValue *it);
+
+// server.config(secret, node_id):配置集群通信密钥与本节点ID
+PyValue py_server_config(const PyValue *secret, const PyValue *node_id);
+// kv.iter_live():实时迭代器,next 时实时查询节点列表
+PyValue py_kv_iter_live();
 }  // extern "C"

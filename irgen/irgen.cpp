@@ -480,6 +480,7 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "start") return "py_server_start";
     if (fn == "stop") return "py_server_stop";
     if (fn == "status") return "py_server_status";
+    if (fn == "config") return "py_server_config";
   }
   // Quantize 模块
   if (mod == "quantize") {
@@ -567,6 +568,7 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "next") return "py_kv_iter_next_v";
     if (fn == "rewind") return "py_kv_iter_rewind_v";
     if (fn == "iter_destroy") return "py_kv_iter_destroy_v";
+    if (fn == "iter_live") return "py_kv_iter_live_v";
   }
   return nullptr;
 }
@@ -708,7 +710,7 @@ Value *IRGen::genCall(const Call *e) {
     auto nIt = nestedParams_.find(sym);
     if (nIt != nestedParams_.end()) lamParams = nIt->second;
   } else {
-    sym = symbolFor(name->id);
+    sym = symbolFor(name->id) + "__impl";
   }
   Function *f = M_.getFunction(sym);
   if (!f) {
@@ -1356,7 +1358,7 @@ void IRGen::genReturn(const Return *s) {
 // ---------------------------------------------------------------------------
 
 void IRGen::genFunction(const FuncDef *fd) {
-  const std::string sym = symbolFor(fd->name);
+  const std::string sym = symbolFor(fd->name) + "__impl";
   Function *fn = M_.getFunction(sym);
   // generate() 的第一趟已经建好声明
 
@@ -1726,7 +1728,7 @@ void IRGen::generate(const Module &ast) {
     auto *fd = dynamic_cast<const FuncDef *>(s.get());
     if (!fd) continue;
 
-    const std::string sym = symbolFor(fd->name);
+    const std::string sym = symbolFor(fd->name) + "__impl";
     if (!declaredSyms_.insert(sym).second) {
       irError(fd->line, fd->col, "函数 '" + fd->name + "' 重复定义");
     }
@@ -1735,9 +1737,31 @@ void IRGen::generate(const Module &ast) {
 
     std::vector<Type *> params;
     for (size_t i = 0; i < fd->params.size(); ++i) params.push_back(abi_.valueTy());
-    // Linux: 用户函数按值接收和返回 PyValue 结构体
+    // 内部实现:模块内按值收发 PyValue(符号带 __impl 后缀)
     auto *ft = FunctionType::get(abi_.valueTy(), params, false);
-    auto *fn = Function::Create(ft, Function::ExternalLinkage, sym, M_);
+    Function::Create(ft, Function::ExternalLinkage, sym, M_);
+    // 导出包装:C++ 宿主约定 —— void(ptr sret, ptr args...)
+    // 第一个参数是返回值缓冲区,其余参数按指针传入(见 docs/llvm-notes.md 第2节)
+    const std::string exportSym = symbolFor(fd->name);
+    std::vector<Type *> wrapParams;
+    wrapParams.push_back(abi_.ptrTy());  // sret 返回槽
+    for (size_t i = 0; i < fd->params.size(); ++i) wrapParams.push_back(abi_.ptrTy());
+    auto *wrapFt = FunctionType::get(abi_.voidTy(), wrapParams, false);
+    auto *wrapFn = Function::Create(wrapFt, Function::ExternalLinkage, exportSym, M_);
+    wrapFn->addParamAttr(0, abi_.sretAttr());
+    // 生成包装函数体:从指针载入参数 -> 调用内部实现 -> 返回值写入 sret 槽
+    {
+      BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", wrapFn);
+      IRBuilder<> wb(entry);
+      std::vector<Value *> callArgs;
+      for (size_t i = 0; i < fd->params.size(); ++i) {
+        callArgs.push_back(wb.CreateLoad(abi_.valueTy(), wrapFn->getArg(static_cast<unsigned>(i + 1)), "arg"));
+      }
+      Function *implFn = M_.getFunction(sym);
+      Value *rv = wb.CreateCall(implFn, callArgs, "rv");
+      wb.CreateStore(rv, wrapFn->getArg(0));
+      wb.CreateRetVoid();
+    }
   }
 
   // 第二趟:填函数体

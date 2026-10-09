@@ -1,4 +1,5 @@
 #include "kv_admin.h"
+#include "cluster.h"
 #include "../include/pylite/runtime.h"
 #include <cstring>
 #include <sstream>
@@ -257,6 +258,29 @@ PyValue py_kv_add_box(const char *node_id, int64_t idLen,
         g_node_sandbox_map[id] = handle;
         g_sandbox_node_map[handle] = id;
     }
+    // 远程地址:通过 cluster.exec 让对端自动拉起节点进程(远程 add_box 落地)
+    if (ok && !a.empty()) {
+        ClusterManager& cm = ClusterManager::instance();
+        std::string cname = "auto-" + a;
+        if (!cm.is_connected(cname)) {
+            const char* sec = std::getenv("PYLITE_CLUSTER_SECRET");
+            cm.connect(cname, a, sec ? sec : "pylite-secret");
+        }
+        std::ostringstream payload;
+        payload << "{\"node_id\":\"" << id << "\","
+                << "\"binary\":\"" << binary << "\","
+                << "\"addr\":\"" << a << "\","
+                << "\"work_dir\":\"/tmp\"}";
+        auto rr = cm.exec(cname, "start_node", payload.str());
+        std::ostringstream out;
+        out << "{\"op\":\"add_box\",\"node_id\":\"" << id
+            << "\",\"success\":" << (rr.success ? "true" : "false");
+        if (!rr.error.empty()) out << ",\"error\":\"" << rr.error << "\"";
+        if (rr.success && !rr.body.empty()) out << ",\"remote\":" << rr.body;
+        out << "}";
+        std::string s = out.str();
+        return py_str_new(s.c_str(), s.size());
+    }
     return op_result("add_box", id, ok, error);
 }
 
@@ -370,6 +394,13 @@ PyValue py_kv_iter_next(const PyValue* it) {
     auto itr = g_kv_iters.find(handle);
     if (itr == g_kv_iters.end()) return py_none();
     KvIterState& st = itr->second;
+    if (st.items.empty()) {
+        // live 模式:实时查询当前节点列表
+        auto nodes = KvAdmin::instance().list_nodes();
+        if (st.cursor >= static_cast<int64_t>(nodes.size())) return py_none();
+        std::string s = node_to_json(nodes[st.cursor++]);
+        return py_str_new(s.c_str(), s.size());
+    }
     if (st.cursor >= static_cast<int64_t>(st.items.size())) return py_none();
     const std::string& s = st.items[st.cursor++];
     return py_str_new(s.c_str(), s.size());
@@ -383,6 +414,24 @@ PyValue py_kv_iter_rewind(const PyValue* it) {
     if (itr == g_kv_iters.end()) return py_int(0);
     itr->second.cursor = 0;
     return py_int(static_cast<int64_t>(itr->second.items.size()));
+}
+
+// kv.iter_live() → 实时迭代器:不做快照,next 时实时查询节点列表。
+// 与 kv.iter 的快照语义互补:迭代期间节点的增删立即可见,
+// 代价是每次 next 都要拿一次管理器锁。
+PyValue py_kv_iter_live() {
+    std::lock_guard<std::mutex> lk(g_kv_iter_mutex);
+    int64_t handle = g_kv_iter_next_handle++;
+    KvIterState st;   // items 留空,作为 live 标记
+    g_kv_iters[handle] = st;
+    PyValue attrs = py_dict_new(nullptr, nullptr, 0);
+    PyValue k1 = py_str_new("handle", 6);
+    PyValue v1 = py_int(handle);
+    py_dict_set(&attrs, &k1, &v1);
+    PyValue k2 = py_str_new("type", 4);
+    PyValue v2 = py_str_new("kv_iter_live", 12);
+    py_dict_set(&attrs, &k2, &v2);
+    return py_instance_new(KV_ITER_CLASS_ID, &attrs);
 }
 
 // kv.iter_destroy(it) → 销毁迭代器, 释放快照

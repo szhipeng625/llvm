@@ -239,4 +239,7 @@ PyValue py_kv_iter_rewind_v(const PyValue* it) {
 PyValue py_kv_iter_destroy_v(const PyValue* it) {
     return py_kv_iter_destroy(it);
 }
+PyValue py_kv_iter_live_v() {
+    return py_kv_iter_live();
+}
 }  // extern "C"

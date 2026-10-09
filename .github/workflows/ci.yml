@@ -1,0 +1,38 @@
+name: PyLite CI
+
+on:
+  push:
+    branches: [ feat/llvm-upload-20261009 ]
+  pull_request:
+    branches: [ feat/llvm-upload-20261009 ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码(含子模块)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libseccomp-dev llvm-dev libclang-dev clang
+
+      - name: 配置构建
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译
+        run: cmake --build build -j4
+
+      - name: 运行测试套件
+        run: cd build && ctest --output-on-failure
+
+      - name: 上传测试日志(失败时)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: build/Testing/Temporary/LastTest.log

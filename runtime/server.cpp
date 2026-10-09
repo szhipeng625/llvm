@@ -22,12 +22,18 @@
 #include <atomic>
 #include <sstream>
 
+extern "C" PyValue py_raft_send(const char*, int64_t, const char*, int64_t);
+extern "C" PyValue py_kv_build(const char*, int64_t, const char*, int64_t, const char*, int64_t, const char*, int64_t, const char*, int64_t);
+
 namespace {
 
 // 全局服务器状态
 std::atomic<bool> g_serverRunning{false};
 int g_serverPort = 8080;
 std::thread g_serverThread;
+// 集群通信配置:/exec 端点校验 Bearer 密钥,消息投递到本节点 raft 收件箱
+std::string g_clusterSecret;
+std::string g_nodeId;
 
 // 简单的 JSON 值提取
 std::string extractJsonString(const std::string &json, const std::string &key) {
@@ -177,7 +183,63 @@ void handleRequest(int clientFd) {
     close(clientFd);
     return;
   }
-
+  // 集群状态端点:cluster.connect 的健康检查走这里
+  if (request.find("GET /status") == 0) {
+    std::string nid = g_nodeId.empty() ? "node-kimi" : g_nodeId;
+    std::string body = "{\"status\":\"ok\",\"node\":\"" + nid + "\",\"port\":" + std::to_string(g_serverPort) + "}";
+    std::string response = buildHttpResponse(200, body);
+    send(clientFd, response.c_str(), response.size(), 0);
+    close(clientFd);
+    return;
+  }
+  // 集群命令端点:对端 cluster.exec 发来的消息落进本节点 raft 收件箱
+  if (request.find("POST /exec") == 0) {
+    std::string auth;
+    size_t ap = request.find("Authorization: Bearer ");
+    if (ap != std::string::npos) {
+      ap += 22;
+      size_t ae = request.find("\r", ap);
+      if (ae != std::string::npos) auth = request.substr(ap, ae - ap);
+    }
+    if (!g_clusterSecret.empty() && auth != g_clusterSecret) {
+      std::string body = buildErrorResponse(401, "未授权的集群请求");
+      std::string response = buildHttpResponse(401, body);
+      send(clientFd, response.c_str(), response.size(), 0);
+      close(clientFd);
+      return;
+    }
+    size_t bodyStart = request.find("\r\n\r\n");
+    std::string jsonBody = (bodyStart != std::string::npos) ? request.substr(bodyStart + 4) : "";
+    std::string cmdType = extractJsonString(jsonBody, "type");
+    std::string payload = extractJsonString(jsonBody, "payload");
+    std::string nid = g_nodeId.empty() ? "node-kimi" : g_nodeId;
+    // start_node 命令:远程拉起节点进程(远程 add_box 的落地动作)
+    if (cmdType == "start_node") {
+      std::string nNodeId = extractJsonString(jsonBody, "node_id");
+      std::string nBinary = extractJsonString(jsonBody, "binary");
+      std::string nAddr   = extractJsonString(jsonBody, "addr");
+      std::string nDir    = extractJsonString(jsonBody, "work_dir");
+      if (nDir.empty()) nDir = "/tmp";
+      PyValue br = py_kv_build(nNodeId.c_str(), nNodeId.size(),
+                               nBinary.c_str(), nBinary.size(),
+                               "[]", 2,
+                               nDir.c_str(), nDir.size(),
+                               nAddr.c_str(), nAddr.size());
+      std::string bs = (br.tag == PY_STR)
+          ? std::string(py_str_data(&br), py_str_size(&br)) : "{}";
+      std::string response = buildHttpResponse(200, bs);
+      send(clientFd, response.c_str(), response.size(), 0);
+      close(clientFd);
+      return;
+    }
+    std::string msg = "{\"type\":\"" + cmdType + "\",\"payload\":" + payload + "}";
+    py_raft_send(nid.c_str(), nid.size(), msg.c_str(), msg.size());
+    std::string body = "{\"received\":true,\"node\":\"" + nid + "\"}";
+    std::string response = buildHttpResponse(200, body);
+    send(clientFd, response.c_str(), response.size(), 0);
+    close(clientFd);
+    return;
+  }
   // 404
   std::string body = buildErrorResponse(404, "未找到请求的端点");
   std::string response = buildHttpResponse(404, body);
@@ -226,6 +288,17 @@ void serverLoop(int port) {
 // ===========================================================================
 // 服务器控制
 // ===========================================================================
+
+// server_config(secret, node_id) —— 配置集群通信密钥与本节点ID
+extern "C" PyValue py_server_config(const PyValue *secret, const PyValue *node_id) {
+  if (secret && secret->tag == PY_STR) {
+    g_clusterSecret.assign(py_str_data(secret), py_str_size(secret));
+  }
+  if (node_id && node_id->tag == PY_STR) {
+    g_nodeId.assign(py_str_data(node_id), py_str_size(node_id));
+  }
+  return py_str_new("{\"configured\":true}", 18);
+}
 
 // server_start(port: int) -> str
 // 启动 HTTP 推理服务。
