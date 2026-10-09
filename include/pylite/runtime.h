@@ -445,4 +445,187 @@ void py_trace_set_dump(const char *path);                 // 设置事件落盘�
 void py_trace_op(const char *category, const char *op, const char *detail,
                  int ok, int64_t elapsed);
 
+// --- 判题沙箱 -------------------------------------------------------------
+// 在受控环境中执行用户提交的代码：seccomp 系统调用白名单 + 降权 + 资源限制。
+// 这些接口供 .pys 脚本在编译时通过 IRGen 生成调用，也可在 C++ 侧直接使用。
+
+// 创建沙箱配置句柄，返回整数句柄
+int64_t py_sandbox_create();
+// 设置 CPU 时间限制（毫秒）
+void py_sandbox_set_cpu_limit(int64_t handle, uint32_t cpu_limit_ms);
+// 设置内存限制（字节）
+void py_sandbox_set_mem_limit(int64_t handle, uint64_t mem_limit_bytes);
+// 设置最大进程数（防进程炸弹）
+void py_sandbox_set_max_pids(int64_t handle, int64_t max_pids);
+// 设置工作目录
+void py_sandbox_set_work_dir(int64_t handle, const char *path, int64_t pathLen);
+// 设置用户可执行文件路径
+void py_sandbox_set_binary(int64_t handle, const char *path, int64_t pathLen);
+// 添加命令行参数
+void py_sandbox_add_arg(int64_t handle, const char *arg, int64_t argLen);
+// 设置标准输入/输出/错误重定向文件
+void py_sandbox_set_stdin(int64_t handle, const char *path, int64_t pathLen);
+void py_sandbox_set_stdout(int64_t handle, const char *path, int64_t pathLen);
+void py_sandbox_set_stderr(int64_t handle, const char *path, int64_t pathLen);
+// 执行沙箱（fork + sandbox_main + exec），返回子进程 pid
+int64_t py_sandbox_exec(int64_t handle);
+// 销毁沙箱配置句柄
+void py_sandbox_destroy(int64_t handle);
+
+// --- cgroup 资源管理 ------------------------------------------------------
+// 基于 Linux cgroup v2 的 CPU/内存/PID 限制与用量监控。
+
+// 创建判题 cgroup（高 CPU 权重 200），返回 cgroup 路径字符串
+PyValue py_cgroup_create_judge(const char *task_id, int64_t taskIdLen,
+                               uint32_t cpu_limit_ms, uint64_t mem_limit_bytes,
+                               int64_t max_pids);
+// 将进程加入 cgroup
+void py_cgroup_attach(const char *cg_path, int64_t pathLen, int64_t pid);
+// 读取 CPU 使用时间（纳秒）
+int64_t py_cgroup_read_cpu_ns(const char *cg_path, int64_t pathLen);
+// 读取内存使用量（字节）
+int64_t py_cgroup_read_mem_bytes(const char *cg_path, int64_t pathLen);
+// 销毁 cgroup
+void py_cgroup_destroy(const char *cg_path, int64_t pathLen);
+
+// --- 系统监控 (sysmon) ----------------------------------------------------
+// 基于 /proc 文件系统的 Linux 系统监控：CPU、内存、进程、网络、文件系统。
+// 所有返回 JSON 字符串的函数，调用方负责通过 py_str_* 解析。
+
+// CPU 统计（所有核心 + 每个核心 + 使用率）
+PyValue py_sysmon_cpu_stats();
+// 指定进程的 CPU 使用时间（毫秒）
+int64_t py_sysmon_process_cpu_ms(int64_t pid);
+// 系统内存信息（总量/可用/缓存/Swap + 使用率）
+PyValue py_sysmon_mem_info();
+// 指定进程的物理内存（RSS，KB）
+int64_t py_sysmon_process_mem_kb(int64_t pid);
+// 指定进程的详细内存信息（峰值/虚拟/RSS/数据段/栈）
+PyValue py_sysmon_process_mem_info(int64_t pid);
+// 所有进程 PID 列表
+PyValue py_sysmon_list_processes();
+// 指定进程的详细信息（PID/PPID/名称/状态/CPU/内存/线程/子进程）
+PyValue py_sysmon_process_info(int64_t pid);
+// 进程树的总资源用量（CPU/内存/PID 数）
+PyValue py_sysmon_tree_usage(int64_t root_pid);
+// 网络接口统计（收发字节/包数）
+PyValue py_sysmon_net_stats();
+// 文件系统配额（总量/已用/可用/inode + 使用率）
+PyValue py_sysmon_fs_quota(const char *path, int64_t pathLen);
+// 目录总大小（字节，递归）
+int64_t py_sysmon_dir_size(const char *path, int64_t pathLen);
+// 目录文件数量（递归）
+int64_t py_sysmon_dir_file_count(const char *path, int64_t pathLen);
+// 系统信息（主机名/内核/发行版/运行时间/CPU 数/总内存）
+PyValue py_sysmon_sys_info();
+// 系统负载（1/5/15 分钟）
+PyValue py_sysmon_load_avg();
+
+// --- Raft 分布式框架 ------------------------------------------------------
+// 基于 Raft 共识算法的分布式集群管理：节点生命周期、状态机命令、
+// 节点注册、动态插件加载。所有接口返回 JSON 字符串。
+
+// 构建并启动 Raft 节点（config_json 含 node_id/bind_addr/peers 等）
+PyValue py_raft_build(const char *config_json, int64_t jsonLen);
+// 删除指定节点
+PyValue py_raft_erase(const char *node_id, int64_t idLen);
+// 获取节点状态（角色/任期/leader/提交索引等）
+PyValue py_raft_status(const char *node_id, int64_t idLen);
+// 列出所有本地节点 ID
+PyValue py_raft_list_nodes();
+// 提交命令到集群（仅 leader 可提交，follower 自动转发）
+PyValue py_raft_add(const char *node_id, int64_t idLen,
+                    const char *cmd_type, int64_t typeLen,
+                    const char *payload, int64_t payloadLen);
+// 注册命令处理器
+int64_t py_raft_register_handler(const char *node_id, int64_t idLen,
+                                  const char *cmd_type, int64_t typeLen);
+// 注册节点角色
+PyValue py_raft_register_node(const char *node_id, int64_t idLen,
+                               const char *role, int64_t roleLen,
+                               const char *addr, int64_t addrLen);
+// 获取集群节点列表
+PyValue py_raft_cluster_nodes(const char *node_id, int64_t idLen);
+// 注册共享存储
+PyValue py_raft_mount_storage(const char *node_id, int64_t idLen,
+                               const char *name, int64_t nameLen,
+                               const char *path, int64_t pathLen);
+// 加载动态插件（集群同步）
+PyValue py_raft_plugin_load(const char *node_id, int64_t idLen,
+                             const char *name, int64_t nameLen,
+                             const char *so_path, int64_t pathLen);
+// 卸载插件
+PyValue py_raft_plugin_unload(const char *node_id, int64_t idLen,
+                               const char *name, int64_t nameLen);
+// 列出已加载插件
+PyValue py_raft_plugin_list(const char *node_id, int64_t idLen);
+
+// --- 集群管理台 (cluster) -------------------------------------------------
+// 轻量级多集群管理控制台：通过指定远程地址连接多个独立集群，
+// 统一查看状态、执行命令、批量操作。管理台本身不运行 Raft 共识。
+
+// 连接到远程集群（name: 别名, addr: host:port, secret: 密钥）
+PyValue py_cluster_connect(const char *name, int64_t nameLen,
+                            const char *addr, int64_t addrLen,
+                            const char *secret, int64_t secretLen);
+// 断开集群连接
+PyValue py_cluster_disconnect(const char *name, int64_t nameLen);
+// 列出所有已连接集群
+PyValue py_cluster_list();
+// 检查集群是否已连接（返回 1/0）
+int64_t py_cluster_is_connected(const char *name, int64_t nameLen);
+// 获取集群完整状态（leader/term/节点列表/健康/延迟）
+PyValue py_cluster_status(const char *name, int64_t nameLen);
+// 获取集群节点列表
+PyValue py_cluster_nodes(const char *name, int64_t nameLen);
+// 健康检查（ping 集群 /status 端点）
+int64_t py_cluster_health(const char *name, int64_t nameLen);
+// 向集群发送命令（HTTP POST /exec）
+PyValue py_cluster_exec(const char *name, int64_t nameLen,
+                         const char *cmd_type, int64_t typeLen,
+                         const char *payload, int64_t payloadLen);
+// 向集群发送查询（HTTP GET）
+PyValue py_cluster_query(const char *name, int64_t nameLen,
+                          const char *path, int64_t pathLen);
+// 向所有已连接集群广播命令
+PyValue py_cluster_broadcast(const char *cmd_type, int64_t typeLen,
+                              const char *payload, int64_t payloadLen);
+// 所有集群健康检查
+PyValue py_cluster_health_all();
+
+// --- 节点管理 (kv_admin) --------------------------------------------------
+// 结合 AdvisKV 的节点生命周期管理：建立节点、进程控制（sleep/wakeup）、
+// 逻辑跳过（skip）、永久移除（erase）。节点间通过 Raft 互相通信。
+
+// 建立节点并启动进程（node_id + 可执行文件 + 参数 + 工作目录 + 地址）
+PyValue py_kv_build(const char *node_id, int64_t idLen,
+                    const char *binary, int64_t binLen,
+                    const char *args_json, int64_t argsLen,
+                    const char *work_dir, int64_t dirLen,
+                    const char *addr, int64_t addrLen);
+// 向集群追加节点（语义同 build）
+PyValue py_kv_add(const char *node_id, int64_t idLen,
+                  const char *binary, int64_t binLen,
+                  const char *args_json, int64_t argsLen,
+                  const char *work_dir, int64_t dirLen,
+                  const char *addr, int64_t addrLen);
+// 永久移除节点（停止进程并删除注册）
+PyValue py_kv_erase(const char *node_id, int64_t idLen);
+// 逻辑跳过节点（标记 LOST，等待副本替换）
+PyValue py_kv_skip(const char *node_id, int64_t idLen);
+// 暂停节点（SIGSTOP，故障注入）
+PyValue py_kv_sleep(const char *node_id, int64_t idLen);
+// 唤醒节点（SIGCONT）
+PyValue py_kv_wakeup(const char *node_id, int64_t idLen);
+// 停止节点（保留注册，可重启）
+PyValue py_kv_stop(const char *node_id, int64_t idLen);
+// 重启节点
+PyValue py_kv_restart(const char *node_id, int64_t idLen);
+// 获取节点详情 JSON
+PyValue py_kv_status(const char *node_id, int64_t idLen);
+// 列出所有节点 JSON
+PyValue py_kv_list();
+// 节点进程是否存活（1/0）
+int64_t py_kv_alive(const char *node_id, int64_t idLen);
+
 }  // extern "C"

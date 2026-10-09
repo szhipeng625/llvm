@@ -56,13 +56,28 @@ add_library(pylite_runtime SHARED
   runtime/concurrency.cpp
   runtime/object.cpp
   runtime/trace.cpp
+  runtime/sandbox.cpp
+  runtime/cgroup.cpp
+  runtime/sandbox_api.cpp
+  runtime/cgroup_api.cpp
+  runtime/sysmon.cpp
+  runtime/sysmon_api.cpp
+  runtime/raft.cpp
+  runtime/raft_api.cpp
+  runtime/cluster.cpp
+  runtime/cluster_api.cpp
+  runtime/kv_admin.cpp
+  runtime/kv_admin_api.cpp
 )
 target_include_directories(pylite_runtime PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 # Linux 上 GCC 默认隐藏符号，需要显式设置默认可见性以匹配 MinGW 行为
 target_compile_options(pylite_runtime PRIVATE -fvisibility=default)
-target_link_libraries(pylite_runtime PRIVATE pthread dl)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SECCOMP REQUIRED libseccomp)
+target_include_directories(pylite_runtime PRIVATE ${SECCOMP_INCLUDE_DIRS})
+target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES})
 
 # ---------------------------------------------------------------------------
 # 前端(词法 / 语法 / AST)—— 不依赖 LLVM
