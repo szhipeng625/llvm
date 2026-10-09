@@ -1,4 +1,23 @@
 #include "cluster.h"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <mutex>
+
+// 客户端 TLS 上下文(跨机通信加密,跳过 CA 验证但保留加密通道)
+static SSL_CTX *g_clientTlsCtx = nullptr;
+static bool g_clientTlsEnabled = false;
+static void clientTlsInit() {
+    static std::once_flag flag;
+    std::call_once(flag, [] {
+        SSL_library_init();
+        SSL_load_error_strings();
+        g_clientTlsCtx = SSL_CTX_new(TLS_client_method());
+        if (g_clientTlsCtx) {
+            SSL_CTX_set_verify(g_clientTlsCtx, SSL_VERIFY_NONE, nullptr);
+            g_clientTlsEnabled = true;
+        }
+    });
+}
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -141,6 +160,21 @@ static RemoteResult http_request(const std::string& method,
         result.elapsed_ms = now_ms() - start;
         return result;
     }
+    SSL *ssl = nullptr;
+    if (!std::getenv("PYLITE_NO_TLS")) {
+        clientTlsInit();
+        if (g_clientTlsEnabled) {
+            ssl = SSL_new(g_clientTlsCtx);
+            SSL_set_fd(ssl, sock);
+            if (SSL_connect(ssl) <= 0) {
+                SSL_free(ssl); ssl = nullptr;
+                result.error = "TLS handshake failed";
+                result.elapsed_ms = now_ms() - start;
+                close(sock);
+                return result;
+            }
+        }
+    }
 
     // 设置读写超时
     struct timeval tv;
@@ -167,7 +201,7 @@ static RemoteResult http_request(const std::string& method,
     }
 
     std::string req_str = req.str();
-    ssize_t sent = send(sock, req_str.c_str(), req_str.size(), 0);
+    ssize_t sent = ssl ? SSL_write(ssl, req_str.c_str(), static_cast<int>(req_str.size())) : send(sock, req_str.c_str(), req_str.size(), 0);
     if (sent < 0) {
         result.error = "send failed";
         close(sock);
@@ -179,7 +213,7 @@ static RemoteResult http_request(const std::string& method,
     char buf[4096];
     std::string response;
     ssize_t n;
-    while ((n = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
+    while ((n = ssl ? SSL_read(ssl, buf, static_cast<int>(sizeof(buf) - 1)) : recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
         buf[n] = '\0';
         response += buf;
     }

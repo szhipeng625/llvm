@@ -25,6 +25,48 @@
 extern "C" PyValue py_raft_send(const char*, int64_t, const char*, int64_t);
 extern "C" PyValue py_kv_build(const char*, int64_t, const char*, int64_t, const char*, int64_t, const char*, int64_t, const char*, int64_t);
 
+// ---- TLS 支持(跨机通信加密,2026-10 增补) ----
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+static SSL_CTX *g_tlsCtx = nullptr;
+static bool g_tlsEnabled = false;
+
+static bool tlsInit(const std::string &certPath, const std::string &keyPath) {
+    if (certPath.empty() || keyPath.empty()) return false;
+    SSL_library_init();
+    SSL_load_error_strings();
+    g_tlsCtx = SSL_CTX_new(TLS_server_method());
+    if (!g_tlsCtx) return false;
+    if (SSL_CTX_use_certificate_file(g_tlsCtx, certPath.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        SSL_CTX_free(g_tlsCtx); g_tlsCtx = nullptr; return false;
+    }
+    if (SSL_CTX_use_PrivateKey_file(g_tlsCtx, keyPath.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        SSL_CTX_free(g_tlsCtx); g_tlsCtx = nullptr; return false;
+    }
+    g_tlsEnabled = true;
+    return true;
+}
+
+static SSL *tlsAccept(int clientFd) {
+    SSL *ssl = SSL_new(g_tlsCtx);
+    SSL_set_fd(ssl, clientFd);
+    if (SSL_accept(ssl) <= 0) {
+        SSL_free(ssl);
+        close(clientFd);
+        return nullptr;
+    }
+    return ssl;
+}
+
+// TLS 读:ssl 为空时回退到明文 recv
+static int tlsRecv(SSL *ssl, char *buf, int size) {
+    return SSL_read(ssl, buf, size - 1);
+}
+static int tlsSend(SSL *ssl, const char *data, int size) {
+    return SSL_write(ssl, data, size);
+}
+
 namespace {
 
 // 全局服务器状态
@@ -100,9 +142,9 @@ std::string buildHttpResponse(int statusCode, const std::string &body,
 }
 
 // 处理单个 HTTP 请求
-void handleRequest(int clientFd) {
+void handleRequest(SSL *ssl, int clientFd) {
   char buffer[8192];
-  ssize_t n = recv(clientFd, buffer, sizeof(buffer) - 1, 0);
+  ssize_t n = tlsRecv(ssl, buffer, sizeof(buffer) - 1);
   if (n <= 0) { close(clientFd); return; }
   buffer[n] = '\0';
 
@@ -111,7 +153,7 @@ void handleRequest(int clientFd) {
   // 处理 CORS 预检请求
   if (request.find("OPTIONS") == 0) {
     std::string response = buildHttpResponse(200, "{}");
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
@@ -120,7 +162,7 @@ void handleRequest(int clientFd) {
   if (request.find("GET /health") == 0) {
     std::string body = "{\"status\":\"ok\",\"service\":\"pylite-inference\"}";
     std::string response = buildHttpResponse(200, body);
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
@@ -131,7 +173,7 @@ void handleRequest(int clientFd) {
                        "{\"id\":\"deepseek-r1-14b-awq\",\"object\":\"model\","
                        "\"owned_by\":\"pylite\"}]}";
     std::string response = buildHttpResponse(200, body);
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
@@ -143,7 +185,7 @@ void handleRequest(int clientFd) {
     if (bodyStart == std::string::npos) {
       std::string body = buildErrorResponse(400, "无效的请求格式");
       std::string response = buildHttpResponse(400, body);
-      send(clientFd, response.c_str(), response.size(), 0);
+      tlsSend(ssl, response.c_str(), response.size());
       close(clientFd);
       return;
     }
@@ -179,7 +221,7 @@ void handleRequest(int clientFd) {
 
     std::string body = buildChatResponse(reply.str(), model);
     std::string response = buildHttpResponse(200, body);
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
@@ -188,7 +230,7 @@ void handleRequest(int clientFd) {
     std::string nid = g_nodeId.empty() ? "node-kimi" : g_nodeId;
     std::string body = "{\"status\":\"ok\",\"node\":\"" + nid + "\",\"port\":" + std::to_string(g_serverPort) + "}";
     std::string response = buildHttpResponse(200, body);
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
@@ -204,7 +246,7 @@ void handleRequest(int clientFd) {
     if (!g_clusterSecret.empty() && auth != g_clusterSecret) {
       std::string body = buildErrorResponse(401, "未授权的集群请求");
       std::string response = buildHttpResponse(401, body);
-      send(clientFd, response.c_str(), response.size(), 0);
+      tlsSend(ssl, response.c_str(), response.size());
       close(clientFd);
       return;
     }
@@ -228,7 +270,7 @@ void handleRequest(int clientFd) {
       std::string bs = (br.tag == PY_STR)
           ? std::string(py_str_data(&br), py_str_size(&br)) : "{}";
       std::string response = buildHttpResponse(200, bs);
-      send(clientFd, response.c_str(), response.size(), 0);
+      tlsSend(ssl, response.c_str(), response.size());
       close(clientFd);
       return;
     }
@@ -236,14 +278,14 @@ void handleRequest(int clientFd) {
     py_raft_send(nid.c_str(), nid.size(), msg.c_str(), msg.size());
     std::string body = "{\"received\":true,\"node\":\"" + nid + "\"}";
     std::string response = buildHttpResponse(200, body);
-    send(clientFd, response.c_str(), response.size(), 0);
+    tlsSend(ssl, response.c_str(), response.size());
     close(clientFd);
     return;
   }
   // 404
   std::string body = buildErrorResponse(404, "未找到请求的端点");
   std::string response = buildHttpResponse(404, body);
-  send(clientFd, response.c_str(), response.size(), 0);
+  tlsSend(ssl, response.c_str(), response.size());
   close(clientFd);
 }
 
@@ -277,7 +319,15 @@ void serverLoop(int port) {
   while (g_serverRunning) {
     int clientFd = accept(serverFd, nullptr, nullptr);
     if (clientFd < 0) continue;
-    handleRequest(clientFd);
+    if (g_tlsEnabled) {
+      SSL *ssl = tlsAccept(clientFd);
+      handleRequest(ssl, clientFd);
+      SSL_shutdown(ssl);
+      SSL_free(ssl);
+    } else {
+      handleRequest(nullptr, clientFd);
+    }
+    close(clientFd);
   }
 
   close(serverFd);
@@ -298,6 +348,16 @@ extern "C" PyValue py_server_config(const PyValue *secret, const PyValue *node_i
     g_nodeId.assign(py_str_data(node_id), py_str_size(node_id));
   }
   return py_str_new("{\"configured\":true}", 18);
+}
+
+// server_tls(cert_path, key_path) —— 开启 TLS 加密监听(跨机通信加密)
+extern "C" PyValue py_server_tls(const PyValue *cert, const PyValue *key) {
+  std::string cp, kp;
+  if (cert && cert->tag == PY_STR) cp.assign(py_str_data(cert), py_str_size(cert));
+  if (key && key->tag == PY_STR) kp.assign(py_str_data(key), py_str_size(key));
+  bool ok = tlsInit(cp, kp);
+  std::string r = ok ? "{\"tls\":\"enabled\"}" : "{\"tls\":\"failed\"}";
+  return py_str_new(r.c_str(), r.size());
 }
 
 // server_start(port: int) -> str

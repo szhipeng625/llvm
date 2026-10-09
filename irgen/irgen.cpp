@@ -482,6 +482,7 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "stop") return "py_server_stop";
     if (fn == "status") return "py_server_status";
     if (fn == "config") return "py_server_config";
+    if (fn == "tls") return "py_server_tls";
   }
   // Quantize 模块
   if (mod == "quantize") {

@@ -680,4 +680,6 @@ typedef PyValue (*PyInstanceMethodFn)(const PyValue *inst, PyValue *args, int64_
 void py_instance_register_method(const char *type_name, int64_t typeLen,
                                  const char *method, int64_t mLen,
                                  PyInstanceMethodFn fn);
+// server.tls(cert_path, key_path):开启 TLS 加密监听
+PyValue py_server_tls(const PyValue *cert, const PyValue *key);
 }  // extern "C"
