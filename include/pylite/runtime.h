@@ -144,6 +144,24 @@ void py_gc_root_pop(size_t n);
 // py_alloc 按最保守的方式扫描 —— 宁可多保留,不可漏根。
 void *py_alloc(size_t n);
 void py_arena_reset();         // 语义已改为"强制回收一次"
+// --- 引用计数(共享指针 / 弱指针语义) -----------------------------------
+// 计数位记在**块头**里,对象自身数据布局与 PyValue 布局都不动,不触碰 ABI 契约。
+// 生命周期:
+//   * 强引用归零                 -> 对象内容失效(仍可被弱引用观察)
+//   * 强引用归零且已无弱引用     -> 真正归还内存
+//   * 弱引用归零                 -> 对象早已失效时,此刻归还内存
+// ⚠️ 强引用计数为 0 表示"尚无强引用登记",此时减引用不做任何事,交回标记-清除;
+//    因此即使生成代码漏插计数调用,也只是退回原行为,绝不会误释放活对象。
+// ⚠️ 循环引用回收不了,由标记-清除按"从根可达"兜底,整体不会泄漏。
+// payload 是堆对象指针(与 PyValue.as.ptr 一致)。
+void py_incref(void *payload);        // 加强引用
+void py_decref(void *payload);        // 减弱引用(归零即失效/释放)
+void py_weakref(void *payload);       // 登记一个弱引用(不影响对象生命周期)
+void py_weak_release(void *payload);  // 释放一个弱引用
+// 弱引用升级为强引用:对象已失效返回 0,否则加引用并返回 1 —— 绝不返回悬空指针。
+int32_t py_weak_upgrade(void *payload);
+int32_t py_weak_alive(void *payload); // 弱引用是否仍指向活对象
+int64_t py_refcount(void *payload);   // 读取强引用计数
 
 // --- 元组 ---------------------------------------------------------------
 // 全部按指针收发,避免聚合体按值跨 ABI 边界
@@ -351,5 +369,80 @@ PyValue py_engine_step();
 PyValue py_engine_status();
 void py_engine_reset();
 PyValue py_engine_serve(const PyValue *port);
+
+// --- 线程 / 进程 / 资源管理 -----------------------------------------------
+// 线程任务用注册表管理:这门语言目前还没有一等函数,线程入口无法在语言里
+// 直接写,由宿主 C++ 按名字注册、语言层按名字启动。
+// 所有跨线程共享状态由一把互斥锁保护,句柄登记在带锁的表里、结束可回收。
+// 线程任务函数的真实签名是 void (*)(void *),arg 原样透传。
+int64_t py_thread_register_task(const char *name, void *fn, void *arg);
+PyValue py_thread_start(const char *taskName);   // 返回线程号
+int64_t py_thread_join(int64_t id);              // 等待结束并回收条目
+int64_t py_thread_alive(int64_t id);             // 1 = 仍在运行
+int64_t py_thread_count();                       // 登记表中的线程数
+// 进程:同步执行(返回标准输出)、后台启动(返回进程号)、等待(返回退出码)、
+// 判活、终止。
+PyValue py_process_run(const PyValue *cmd);
+int64_t py_process_spawn(const PyValue *cmd);
+int64_t py_process_wait(int64_t id);
+int64_t py_process_alive(int64_t id);
+int64_t py_process_kill(int64_t id);
+// 资源管理:快照(线程与进程计数)与回收已结束的线程条目。
+PyValue py_resource_stats();
+int64_t py_resource_reap();
+
+// --- 类实例 ---------------------------------------------------------------
+// 实例 = 类标识 + 属性表(用字典承载)。属性名是字符串,实例有没有某个属性
+// 只有运行时才知道 —— 与"方法名写错是运行时错误"是同一套取舍。
+// 方法不进属性表:成员方法由编译期直接解析成函数调用,运行时只负责属性。
+PyValue py_instance_new(int64_t classId, const PyValue *attrs);
+int64_t py_instance_class_id(const PyValue *inst);
+void py_instance_set_attr(const PyValue *inst, const char *name, int64_t nameLen,
+                          const PyValue *val);
+PyValue py_instance_get_attr(const PyValue *inst, const char *name, int64_t nameLen);
+int32_t py_instance_has_attr(const PyValue *inst, const char *name, int64_t nameLen);
+int64_t py_instance_attr_count(const PyValue *inst);
+
+// --- 互斥锁与条件变量 -----------------------------------------------------
+// 句柄是一个整数,实际对象登记在运行时内部,靠句柄访问 —— 语言层不必认识原生指针。
+// 条件变量的等待会原子地放开传入的那把锁,被唤醒后重新拿回它;
+// 这正是"检查条件"与"等待"之间不丢唤醒的关键。
+// ⚠️ 等条件变量前必须先拿到配套的那把锁:检查条件与进入等待之间不能有缝,
+// 否则通知可能在两者之间发出,等待者就永远等下去了。
+PyValue py_sync_mutex_new();                              // 创建锁,返回句柄
+PyValue py_sync_mutex_lock(const PyValue *h);             // 加锁(阻塞直到拿到)
+PyValue py_sync_mutex_unlock(const PyValue *h);           // 解锁
+PyValue py_sync_mutex_free(const PyValue *h);             // 销毁锁
+PyValue py_sync_cond_new();                               // 创建条件变量,返回句柄
+PyValue py_sync_cond_wait(const PyValue *ch, const PyValue *mh);  // 等待通知
+PyValue py_sync_cond_signal(const PyValue *ch);           // 唤醒一个等待者
+PyValue py_sync_cond_broadcast(const PyValue *ch);        // 唤醒全部等待者
+PyValue py_sync_cond_free(const PyValue *ch);             // 销毁条件变量
+PyValue py_sync_stats();                                  // 同步原语数量快照
+
+// --- 运行时通信 -----------------------------------------------------------
+// 把程序运行情况(函数进入/退出、变量赋值、错误)实时推送到前端。
+// 启动后会在指定端口上跑一个极简 HTTP 服务,前端通过服务器推送事件连接。
+// port 为 0 表示用默认端口 18900。
+void py_trace_start(int port);                            // 启动通信服务
+void py_trace_stop();                                     // 停止通信服务
+int64_t py_trace_enter(const char *name, int64_t parentId); // 函数进入,返回帧标识
+void py_trace_exit(int64_t id, const char *name, int ok, int64_t elapsed); // 函数退出
+void py_trace_vars(const char *varsJson);                 // 变量赋值(JSON 键值对)
+void py_trace_error(const char *msg);                     // 错误事件
+int32_t py_trace_enabled();                               // 是否已启用
+// --- 供编译期插桩使用的便捷接口 ---
+int64_t py_trace_begin(const char *name);                 // 函数进入:自动计时与层级
+int64_t py_trace_begin_args(const char *name, int count,
+                            const char *const *paramNames,
+                            const PyValue *const *paramValues);  // 函数进入:附带形参名与实参值
+void py_trace_end(int64_t id, const char *name, int ok);  // 函数退出:自动算耗时
+void py_trace_var(const char *name, const char *value);   // 变量上报(字符串值)
+void py_trace_var_value(const char *name, const PyValue *v); // 变量上报(直接收值)
+void py_trace_set_dump(const char *path);                 // 设置事件落盘文件路径
+// cuda / docker 操作事件:category 取 cuda 或 docker,op 为操作名,
+// detail 为对象描述,ok 为是否成功,elapsed 为耗时(毫秒)。
+void py_trace_op(const char *category, const char *op, const char *detail,
+                 int ok, int64_t elapsed);
 
 }  // extern "C"

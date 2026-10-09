@@ -78,7 +78,9 @@ struct UnaryOp : Expr {
 
 struct Call : Expr {
   ExprPtr callee;
-  std::vector<ExprPtr> args;
+  std::vector<ExprPtr> args;                            // 位置参数
+  // 关键字参数 name=value。按名字绑定,调用点重排成位置顺序后交给被调函数。
+  std::vector<std::pair<std::string, ExprPtr>> kwargs;
   void dump(std::ostream &, int) const override;
 };
 
@@ -202,11 +204,42 @@ struct Continue : Stmt {
   void dump(std::ostream &, int) const override;
 };
 
+// 函数形参。
+//   defaultValue != nullptr  -> 默认参数,调用时可省略
+//   isVararg == true         -> *args,收集多余的未知位置参数
+// 必填参数必须排在默认参数之前,可变参数排在最后 —— 由解析器保证。
+struct Param {
+  std::string name;
+  TypeName type = TypeName::Any;
+  ExprPtr defaultValue;   // 默认值表达式;nullptr 表示必填
+  bool isVararg = false;  // *args
+};
+
 struct FuncDef : Stmt {
   std::string name;
-  std::vector<std::pair<std::string, TypeName>> params;
+  std::vector<Param> params;
   TypeName retType = TypeName::Any;
   std::vector<StmtPtr> body;
+  void dump(std::ostream &, int) const override;
+};
+
+// 匿名函数(lambda)。解析完得到一个可与其他值同样传递的第一类函数值。
+// 单表达式体会被解析器包成一条 return。
+struct Lambda : Expr {
+  std::vector<Param> params;
+  std::vector<StmtPtr> body;
+  void dump(std::ostream &, int) const override;
+};
+
+// 类定义。
+//   name       —— 类名
+//   baseName   —— 父类名(空表示没有父类);当前支持单继承、方法可重写
+//   methods    —— 成员方法,每个方法都是带 self 形参的普通函数体
+// 属性不在这里声明:属性在实例化后按需产生(与 Python 一致的写法)。
+struct ClassDef : Stmt {
+  std::string name;
+  std::string baseName;
+  std::vector<std::unique_ptr<FuncDef>> methods;
   void dump(std::ostream &, int) const override;
 };
 

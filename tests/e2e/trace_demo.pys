@@ -1,0 +1,27 @@
+# 插桩端到端验证:递归 / 嵌套函数 / lambda / 变量赋值上报
+
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def outer(x: int) -> int:
+    base = x * 10
+    def inner(y: int) -> int:
+        return y + base
+    return inner(5)
+
+result_fib = fib(8)
+print(result_fib)
+
+result_outer = outer(3)
+print(result_outer)
+
+double = lambda t: t * 2
+result_lambda = double(double(7))
+print(result_lambda)
+
+counter = 0
+for i in range(1, 5):
+    counter = counter + i
+print(counter)

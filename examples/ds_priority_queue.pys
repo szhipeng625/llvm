@@ -1,0 +1,75 @@
+# 优先队列:二叉最小堆。
+#
+# 用列表当底层存储,堆顶在 0 号位。
+#   push:先放到末尾,再向上调整(sift up)
+#   pop :取走堆顶,把末尾元素搬到堆顶,再向下调整(sift down)
+# 两个操作都是 O(log n),查看堆顶是 O(1)。
+
+class MinHeap:
+    def __init__(self):
+        self.data = []
+
+    def size(self):
+        return len(self.data)
+
+    def empty(self):
+        return len(self.data) == 0
+
+    def peek(self):
+        if len(self.data) == 0:
+            return None
+        return self.data[0]
+
+    def push(self, v):
+        self.data.append(v)
+        self.sift_up(len(self.data) - 1)
+
+    # 向上调整:与父节点比较,比父节点小就交换,直到位置正确
+    def sift_up(self, i):
+        while i > 0:
+            parent = (i - 1) // 2
+            if self.data[parent] > self.data[i]:
+                tmp = self.data[parent]
+                self.data[parent] = self.data[i]
+                self.data[i] = tmp
+                i = parent
+            else:
+                return
+
+    def pop(self):
+        if len(self.data) == 0:
+            return None
+        top = self.data[0]
+        last = self.data.pop()
+        if len(self.data) > 0:
+            self.data[0] = last
+            self.sift_down(0)
+        return top
+
+    # 向下调整:在左右孩子里挑更小的,比它大就交换
+    def sift_down(self, i):
+        while True:
+            n = len(self.data)
+            left = 2 * i + 1
+            right = 2 * i + 2
+            small = i
+            if left < n and self.data[left] < self.data[small]:
+                small = left
+            if right < n and self.data[right] < self.data[small]:
+                small = right
+            if small == i:
+                return
+            tmp = self.data[i]
+            self.data[i] = self.data[small]
+            self.data[small] = tmp
+            i = small
+
+# --- 自测 ---
+h = MinHeap()
+for v in [5, 3, 8, 1, 9, 2, 7]:
+    h.push(v)
+print(h.size())
+print(h.peek())
+while not h.empty():
+    print(h.pop())
+print(h.size())

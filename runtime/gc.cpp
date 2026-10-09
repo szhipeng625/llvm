@@ -33,7 +33,10 @@ struct alignas(16) GcBlock {
   uint32_t kind;        // PyGcScan
   uint32_t mark;        // 标记位
   uint32_t cellOffset;  // SCAN_VALUES 的单元格起始偏移(元组是 8,其余是 0)
-  uint32_t pad;
+  uint32_t refcount;    // 强引用计数(共享指针语义)
+  uint32_t weakcount;   // 弱引用计数
+  uint32_t destroyed;   // 强引用归零后置 1:内容已失效,控制块可能仍被弱引用观察
+  uint32_t pad;         // 补到 16 的倍数,保持 payload 仍然 16 字节对齐
 };
 
 // 块表。不用 vector:保持 GC 完全不依赖 STL。
@@ -141,6 +144,9 @@ extern "C" void *py_gc_alloc(size_t n, PyGcScan kind) {
   b->kind = static_cast<uint32_t>(kind);
   b->mark = 0;
   b->cellOffset = 0;
+  b->refcount = 0;    // 0 表示尚无强引用登记,交给标记-清除
+  b->weakcount = 0;
+  b->destroyed = 0;
   b->pad = 0;
 
   tablePush(b);
@@ -183,6 +189,94 @@ extern "C" void *py_gc_alloc_values(size_t n, size_t firstCellOffset) {
 // 宁可多保留,不可漏根。
 extern "C" void *py_alloc(size_t n) {
   return py_gc_alloc(n, PY_GC_SCAN_WORDS);
+}
+// --- 引用计数(共享指针 / 弱指针语义) -----------------------------------
+// 计数位记在**块头**里,对象自身数据布局与 PyValue 布局都不动 —— 不触碰
+// ABI 契约,已编译的目标文件不受影响。
+//
+// 生命周期与 std::shared_ptr / std::weak_ptr 对齐:
+//   * 强引用(refcount)归零         -> 对象内容失效(destroyed=1)并下毒
+//   * 强引用归零且已无弱引用       -> 此时才真正归还内存
+//   * 弱引用(weakcount)归零        -> 若对象早已失效,此刻归还内存
+//
+// ⚠️ refcount 为 0 表示"尚无强引用登记":此时减引用不做任何事,交回标记-清除。
+// 于是即使生成代码没有配套插入计数调用,行为也只是退回原来的回收方式,
+// 绝不会误释放仍然活着的对象。
+//
+// ⚠️ 强引用归零时**不递归递减子对象**:深链递归会爆 C 栈(同类故障见
+// docs/llvm-notes.md 第 2.2 节),而各容器的真实布局只在各自的翻译单元里,
+// 这里看不到。子对象交给标记-清除按"从根可达"回收,不会泄漏。
+namespace {
+inline GcBlock *blockOf(void *payload) {
+  return reinterpret_cast<GcBlock *>(static_cast<char *>(payload) - sizeof(GcBlock));
+}
+// 从块表摘除并归还内存
+void releaseBlock(GcBlock *b) {
+  for (size_t i = 0; i < g_tableLen; ++i) {
+    if (g_table[i] != b) continue;
+    const int64_t charged = static_cast<int64_t>(sizeof(GcBlock) + b->size);
+    g_liveBytes -= charged;
+    g_freedBytes += charged;
+    tableRemoveAt(i);
+    std::free(b);
+    return;
+  }
+}
+// 对象内容失效:只下毒、不归还内存(控制块可能仍被弱引用观察)
+void destroyPayload(GcBlock *b) {
+  b->destroyed = 1;
+  b->refcount = 0;
+  std::memset(reinterpret_cast<char *>(b) + sizeof(GcBlock), 0xDD, b->size);
+}
+}  // namespace
+extern "C" void py_incref(void *payload) {
+  if (payload == nullptr) return;
+  ++blockOf(payload)->refcount;
+}
+extern "C" void py_decref(void *payload) {
+  if (payload == nullptr) return;
+  GcBlock *b = blockOf(payload);
+  if (b->refcount == 0) return;   // 未登记强引用,交给标记-清除
+  if (--b->refcount > 0) return;
+  // 强引用归零:内容立即失效。没有弱引用在观察时才归还内存。
+  if (b->weakcount == 0) {
+    releaseBlock(b);
+  } else {
+    destroyPayload(b);
+  }
+}
+// 弱引用:只观察对象存活,不影响其生命周期
+extern "C" void py_weakref(void *payload) {
+  if (payload == nullptr) return;
+  ++blockOf(payload)->weakcount;
+}
+extern "C" void py_weak_release(void *payload) {
+  if (payload == nullptr) return;
+  GcBlock *b = blockOf(payload);
+  if (b->weakcount == 0) return;
+  if (--b->weakcount > 0) return;
+  // 最后一个弱引用也走了:若对象早已失效,此刻归还内存
+  if (b->destroyed) releaseBlock(b);
+}
+// 弱引用升级为强引用:对象已失效返回 0,否则加引用并返回 1。
+// 绝不返回悬空指针 —— 要么拿到有效对象,要么明确失败。
+extern "C" int32_t py_weak_upgrade(void *payload) {
+  if (payload == nullptr) return 0;
+  GcBlock *b = blockOf(payload);
+  if (b->destroyed || b->refcount == 0) return 0;
+  ++b->refcount;
+  return 1;
+}
+// 弱引用是否仍指向活对象
+extern "C" int32_t py_weak_alive(void *payload) {
+  if (payload == nullptr) return 0;
+  GcBlock *b = blockOf(payload);
+  return (b->destroyed == 0 && b->refcount > 0) ? 1 : 0;
+}
+// 读取强引用计数(供内建函数与测试使用)
+extern "C" int64_t py_refcount(void *payload) {
+  if (payload == nullptr) return 0;
+  return blockOf(payload)->refcount;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +490,16 @@ void sweepBlocks() {
     GcBlock *b = g_table[i];
     if (b->mark) {
       b->mark = 0;
+      ++i;
+      continue;
+    }
+    // 有弱引用正在观察:不归还内存,只标记内容失效并下毒。
+    // 这样弱引用仍能读到"对象已失效"这个确定状态,而不会指向已释放地址;
+    // 最后一个弱引用释放时(refcount 已为 0 的路径)才真正归还内存。
+    if (b->weakcount > 0) {
+      b->destroyed = 1;
+      b->refcount = 0;   // 已不可达,强引用视为失效
+      poisonBlock(b);
       ++i;
       continue;
     }

@@ -22,6 +22,7 @@
 #include <vector>
 #include <queue>
 #include <map>
+#include <algorithm>
 
 // ===========================================================================
 // PagedAttention KV Cache

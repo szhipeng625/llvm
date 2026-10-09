@@ -28,7 +28,7 @@ int main() {
                              "x86_64-unknown-linux-gnu"}) {
     std::string err;
     // 用接受 Triple 的重载;收 StringRef 的那个在 LLVM 22 已弃用
-    const llvm::Target *t = llvm::TargetRegistry::lookupTarget(llvm::Triple(triple), err);
+    const llvm::Target *t = llvm::TargetRegistry::lookupTarget(triple, err);
     if (t) {
       std::printf("  [ok]   %-26s -> %s\n", triple, t->getName());
     } else {

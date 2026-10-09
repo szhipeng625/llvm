@@ -28,7 +28,7 @@ std::unique_ptr<TargetMachine> makeTargetMachine(const Triple &TT, std::string *
   initializeCodeGenTargets();
 
   std::string err;
-  const Target *T = TargetRegistry::lookupTarget(TT, err);
+  const Target *T = TargetRegistry::lookupTarget(TT.getTriple(), err);
   if (!T) {
     if (error) *error = "找不到目标平台 " + TT.str() + ": " + err;
     return nullptr;
@@ -40,7 +40,7 @@ std::unique_ptr<TargetMachine> makeTargetMachine(const Triple &TT, std::string *
   // createTargetMachine 在 LLVM 22 收的是 Triple 而不是 StringRef 了,
   // 传 TT.getTriple()(std::string)会编译失败
   auto TM = std::unique_ptr<TargetMachine>(T->createTargetMachine(
-      TT, /*CPU=*/"generic", /*Features=*/"", opt, relocModel,
+      TT.getTriple(), /*CPU=*/"generic", /*Features=*/"", opt, relocModel,
       std::nullopt, CodeGenOptLevel::Default));
   if (!TM && error) *error = "无法为目标平台创建 TargetMachine";
   return TM;
@@ -93,7 +93,7 @@ bool emitObjectFile(Module &M, const std::string &outPath, std::string *error) {
   auto TM = makeTargetMachine(TT, error);
   if (!TM) return false;
 
-  M.setTargetTriple(TT);
+  M.setTargetTriple(TT.getTriple());
   M.setDataLayout(TM->createDataLayout());
 
   runOptimizationPipeline(M, *TM);
@@ -125,7 +125,7 @@ bool emitIRText(Module &M, const std::string &outPath, std::string *error) {
   auto TM = makeTargetMachine(TT, error);
   if (!TM) return false;
 
-  M.setTargetTriple(TT);
+  M.setTargetTriple(TT.getTriple());
   M.setDataLayout(TM->createDataLayout());
 
   std::error_code ec;

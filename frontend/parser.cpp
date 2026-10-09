@@ -106,6 +106,7 @@ std::vector<StmtPtr> Parser::parseBlock() {
 StmtPtr Parser::parseStmt() {
   switch (cur().kind) {
     case Tok::KwDef:    return parseFuncDef();
+    case Tok::KwClass:  return parseClassDef();
     case Tok::KwIf:     return parseIf();
     case Tok::KwWhile:  return parseWhile();
     case Tok::KwFor:    return parseFor();
@@ -190,16 +191,7 @@ StmtPtr Parser::parseFuncDef() {
   f->name = name.text;
 
   expect(Tok::LParen, "'('");
-  if (!at(Tok::RParen)) {
-    for (;;) {
-      const Token &p = expect(Tok::Identifier, "参数名");
-      TypeName ty = TypeName::Any;
-      if (accept(Tok::Colon)) ty = parseTypeAnnotation();
-      f->params.emplace_back(p.text, ty);
-      if (!accept(Tok::Comma)) break;
-      if (at(Tok::RParen)) break;
-    }
-  }
+  f->params = parseParams();
   expect(Tok::RParen, "')'");
   if (accept(Tok::Arrow)) f->retType = parseTypeAnnotation();
 
@@ -207,6 +199,74 @@ StmtPtr Parser::parseFuncDef() {
   expect(Tok::Newline, "行尾");
   f->body = parseBlock();
   return f;
+}
+
+// 形参列表:(name[:type] [= default] | *args),逗号分隔,允许尾随逗号。
+// 顺序约束:必填 -> 带默认值 -> *args。违反时报错,而不是生成语义模糊的代码。
+std::vector<Param> Parser::parseParams(bool allowTypes) {
+  std::vector<Param> params;
+  bool seenDefault = false;
+  bool seenVararg = false;
+  if (at(Tok::RParen)) return params;
+  for (;;) {
+    Param p;
+    if (accept(Tok::Star)) {
+      if (seenVararg) failAt(cur(), "*args 只能出现一次");
+      seenVararg = true;
+      const Token &v = expect(Tok::Identifier, "*args 后面的参数名");
+      p.isVararg = true;
+      p.name = v.text;
+    } else {
+      if (seenVararg) failAt(cur(), "*args 之后不能再有普通参数");
+      const Token &nm = expect(Tok::Identifier, "参数名");
+      p.name = nm.text;
+      // 只在允许的场景吃冒号。匿名函数的冒号是函数体分隔符,不能当类型注解。
+      if (allowTypes && accept(Tok::Colon)) p.type = parseTypeAnnotation();
+      if (accept(Tok::Assign)) {
+        p.defaultValue = parseExpr();
+        seenDefault = true;
+      } else if (seenDefault) {
+        failAt(nm, "带默认值的参数之后不能有无默认值的参数");
+      }
+    }
+    params.push_back(std::move(p));
+    if (!accept(Tok::Comma)) break;
+    if (at(Tok::RParen)) break;
+  }
+  return params;
+}
+
+// 类定义:class 名字[(父类)]: 后面跟一个缩进块,块里是若干 def 成员方法。
+// 成员方法就是带实例参数的普通函数,所以直接复用 parseFuncDef。
+// 当前允许类体里只写方法定义 —— 属性在实例化后按需产生(与 Python 一致)。
+StmtPtr Parser::parseClassDef() {
+  const Token &kw = cur();
+  expect(Tok::KwClass, "'class'");
+  const Token &name = expect(Tok::Identifier, "类名");
+  auto c = std::make_unique<ClassDef>();
+  c->line = kw.line;
+  c->col = kw.col;
+  c->name = name.text;
+  if (accept(Tok::LParen)) {
+    if (!at(Tok::RParen)) {
+      const Token &base = expect(Tok::Identifier, "父类名");
+      c->baseName = base.text;
+    }
+    expect(Tok::RParen, "')'");
+  }
+  expect(Tok::Colon, "':'");
+  expect(Tok::Newline, "行尾");
+  expect(Tok::Indent, "缩进块(类体里写方法定义)");
+  while (!at(Tok::Dedent) && !at(Tok::EndOfFile)) {
+    if (!at(Tok::KwDef)) {
+      fail("类体里目前只能写方法定义(def ...)");
+    }
+    auto f = parseFuncDef();
+    c->methods.emplace_back(static_cast<FuncDef *>(f.release()));
+    while (at(Tok::Newline)) ++pos_;
+  }
+  accept(Tok::Dedent);
+  return c;
 }
 
 StmtPtr Parser::parseIf() {
@@ -470,7 +530,19 @@ ExprPtr Parser::parsePostfix() {
       c->callee = std::move(e);
       if (!at(Tok::RParen)) {
         for (;;) {
-          c->args.push_back(parseExpr());
+          // 关键字参数:识别 `标识符 =` 的形状。必须靠前瞻判断,
+          // 不能先解析表达式再回退 —— 解析器没有回溯。
+          if (at(Tok::Identifier) && peek(1).kind == Tok::Assign) {
+            std::string kwName = cur().text;
+            ++pos_;  // 标识符
+            ++pos_;  // '='
+            c->kwargs.emplace_back(std::move(kwName), parseExpr());
+          } else {
+            if (!c->kwargs.empty()) {
+              failAt(cur(), "关键字参数之后不能再有位置参数");
+            }
+            c->args.push_back(parseExpr());
+          }
           if (!accept(Tok::Comma)) break;
           if (at(Tok::RParen)) break;  // 尾随逗号
         }
@@ -574,6 +646,8 @@ ExprPtr Parser::parseAtom() {
       e->col = t.col;
       return e;
     }
+    case Tok::KwLambda:
+      return parseLambda();
     case Tok::LParen: {
       ++pos_;
       if (accept(Tok::RParen)) {  // 空元组
@@ -682,6 +756,24 @@ ExprPtr Parser::parseAtom() {
     default:
       fail("这里需要一个表达式");
   }
+}
+
+// lambda 形参: 表达式 —— 匿名函数。单表达式体被包成一条 return,
+// 这样匿名函数与普通函数在后续处理上走完全同一条路径。
+ExprPtr Parser::parseLambda() {
+  const Token &kw = cur();
+  expect(Tok::KwLambda, "'lambda'");
+  auto e = std::make_unique<Lambda>();
+  e->line = kw.line;
+  e->col = kw.col;
+  if (!at(Tok::Colon)) e->params = parseParams(/*allowTypes=*/false);
+  expect(Tok::Colon, "':'");
+  auto ret = std::make_unique<Return>();
+  ret->line = kw.line;
+  ret->col = kw.col;
+  ret->value = parseExpr();
+  e->body.push_back(std::move(ret));
+  return e;
 }
 
 TypeName Parser::parseTypeAnnotation() {

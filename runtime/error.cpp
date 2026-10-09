@@ -10,9 +10,15 @@
 
 extern "C" {
 
+// 通信模块的前置声明:避免 error.cpp 依赖 trace.cpp 的头文件。
+// 链接时由运行时库统一解析。
+extern void py_trace_error(const char *msg);
+
 [[noreturn]] void py_runtime_error(const char *msg) {
   // 先冲 stdout:报错信息不能插在用户程序输出中间
   std::fflush(stdout);
+  // 把错误推送到前端(若通信模块已启用)
+  py_trace_error(msg);
   std::fprintf(stderr, "PyLite error: %s\n", msg);
   std::fflush(stderr);
   std::exit(1);

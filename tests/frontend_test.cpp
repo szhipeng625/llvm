@@ -290,8 +290,8 @@ int main() {
     auto m = parse("def f(a: int, b: str) -> bool:\n    return True\n");
     auto *fd = dynamic_cast<const FuncDef *>(stmt(*m, 0));
     check(fd && fd->params.size() == 2, "函数定义:两个参数");
-    check(fd && fd->params[0].second == TypeName::Int &&
-              fd->params[1].second == TypeName::Str,
+    check(fd && fd->params[0].type == TypeName::Int &&
+              fd->params[1].type == TypeName::Str,
           "函数定义:参数类型注解正确");
     check(fd && fd->retType == TypeName::Bool, "函数定义:返回类型注解正确");
   }

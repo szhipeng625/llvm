@@ -152,14 +152,8 @@ Value *IRGen::genExpr(const Expr *e) {
     irError(x->line, x->col, "range() 只能直接用在 for 的迭代对象位置");
   }
   if (auto *x = dynamic_cast<const InputExpr *>(e)) return genInput(x);
-  if (auto *x = dynamic_cast<const Attribute *>(e)) {
-    // obj.attr 的取值形式没有实现,只有 obj.attr(...) 的调用形式(在 genCall 里)。
-    // 本语言没有属性(字段),所以这不算缺口 —— 但报错要说清楚,别让人以为
-    // 只是"暂时没做"。
-    irError(x->line, x->col,
-            "不支持单独的属性访问 '." + x->name + "';只有方法调用 '." + x->name +
-                "(...)' 是有意义的");
-  }
+  if (auto *x = dynamic_cast<const Lambda *>(e)) return genLambdaExpr(x);
+  if (auto *x = dynamic_cast<const Attribute *>(e)) return genAttrGet(x);
 
   irError(e->line, e->col, "无法生成代码:不认识的表达式节点");
 }
@@ -337,6 +331,44 @@ Value *IRGen::genGcCollect(const Call *e) {
 // x 到编译期根本没有静态类型。于是方法名拼错是**运行时**错误,这一点在
 // docs/language.md 里写明了。
 Value *IRGen::genMethodCall(const Call *e, const Attribute *attr) {
+  // 实例方法:调用者是记录了类名的变量时,解析成对该类方法的直接调用 ——
+  // 实例作为第一个实参(与方法的第一个形参对应),其余实参按序跟在后面。
+  // 先解析出调用接收者对应的类名:既支持 `obj.m(...)`(obj 是记录过类名的变量),
+  // 也支持 `self.X.m(...)`(self.X 是记录过类型的属性 —— 组合结构)。
+  std::string recvClass;
+  if (auto *base = dynamic_cast<const Name *>(attr->obj.get())) {
+    auto vc = varClasses_.find(curFn_->getName().str() + "::" + base->id);
+    if (vc != varClasses_.end()) recvClass = vc->second;
+  } else if (auto *inner = dynamic_cast<const Attribute *>(attr->obj.get())) {
+    if (auto *base = dynamic_cast<const Name *>(inner->obj.get())) {
+      auto vc = varClasses_.find(curFn_->getName().str() + "::" + base->id);
+      if (vc != varClasses_.end()) {
+        auto ac = classAttrClasses_.find(vc->second + "." + inner->name);
+        if (ac != classAttrClasses_.end()) recvClass = ac->second;
+      }
+    }
+  }
+  if (!recvClass.empty()) {
+      const std::string sym = "pylite_" + sanitize(moduleName_) + "_class_" +
+                              sanitize(recvClass) + "_" + sanitize(attr->name);
+      Function *f = M_.getFunction(sym);
+      if (f == nullptr) {
+        // 方法不存在时报清楚的错,而不是回退到内置方法给出误导性的提示
+        irError(e->line, e->col,
+                "类 '" + recvClass + "' 没有方法 '" + attr->name + "'");
+      }
+      Value *self = genExpr(attr->obj.get());
+      std::vector<Value *> callArgs;
+      callArgs.push_back(B_.CreateLoad(abi_.valueTy(), self));
+      for (const auto &a : e->args) {
+        Value *s = genExpr(a.get());
+        callArgs.push_back(B_.CreateLoad(abi_.valueTy(), s));
+      }
+      Value *ret = abi_.newSlot(B_, attr->name + ".ret");
+      Value *val = B_.CreateCall(f, callArgs, attr->name + ".r");
+      B_.CreateStore(val, ret);
+      return ret;
+  }
   // 求值顺序与 Python 一致:先算对象,再算参数
   Value *obj = genExpr(attr->obj.get());
   Value *args = evalToArray(e->args, "call.args");
@@ -438,6 +470,84 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
   return nullptr;
 }
 
+// 调用点的参数绑定:位置参数 -> 关键字参数 -> 缺省值 -> *args。
+// params 为 nullptr 表示拿不到参数表,退回严格按位置匹配。
+void IRGen::bindCallArgs(const std::vector<Param> *params, const Call *e,
+                         Function *f, const std::string &calleeName,
+                         std::vector<Value *> &out) {
+  if (params == nullptr) {
+    const size_t expected = f->arg_size();
+    if (e->args.size() != expected || !e->kwargs.empty()) {
+      irError(e->line, e->col,
+              "函数 '" + calleeName + "' 需要 " + std::to_string(expected) +
+                  " 个参数,给了 " + std::to_string(e->args.size()) + " 个");
+    }
+    for (const auto &a : e->args) {
+      Value *slot = genExpr(a.get());
+      out.push_back(B_.CreateLoad(abi_.valueTy(), slot));
+    }
+    return;
+  }
+  const auto &ps = *params;
+  const size_t total = ps.size();
+  bool hasVararg = false;
+  for (size_t i = 0; i < total; ++i) {
+    if (ps[i].isVararg) hasVararg = true;
+  }
+  std::vector<Value *> slots(total, nullptr);
+  size_t pi = 0;
+  for (; pi < e->args.size() && pi < total; ++pi) {
+    if (ps[pi].isVararg) break;
+    slots[pi] = genExpr(e->args[pi].get());
+  }
+  for (const auto &kw : e->kwargs) {
+    size_t idx = total;
+    for (size_t i = 0; i < total; ++i) {
+      if (!ps[i].isVararg && ps[i].name == kw.first) { idx = i; break; }
+    }
+    if (idx == total) {
+      irError(e->line, e->col,
+              "函数 '" + calleeName + "' 没有名为 '" + kw.first + "' 的参数");
+    }
+    if (slots[idx]) {
+      irError(e->line, e->col, "参数 '" + kw.first + "' 被重复传入");
+    }
+    slots[idx] = genExpr(kw.second.get());
+  }
+  std::vector<Value *> extra;
+  for (; pi < e->args.size(); ++pi) extra.push_back(genExpr(e->args[pi].get()));
+  if (!extra.empty() && !hasVararg) {
+    irError(e->line, e->col, "函数 '" + calleeName + "' 收到了多余的位置参数");
+  }
+  for (size_t i = 0; i < total; ++i) {
+    if (ps[i].isVararg || slots[i]) continue;
+    if (ps[i].defaultValue) {
+      slots[i] = genExpr(ps[i].defaultValue.get());
+    } else {
+      irError(e->line, e->col,
+              "函数 '" + calleeName + "' 缺少必填参数 '" + ps[i].name + "'");
+    }
+  }
+  for (size_t i = 0; i < total; ++i) {
+    if (!ps[i].isVararg) continue;
+    if (extra.empty()) {
+      Value *np = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+      slots[i] = abi_.callPtrI64(B_, "py_list_new", np, B_.getInt64(0));
+    } else {
+      Value *arr = abi_.newSlotArray(B_, static_cast<int64_t>(extra.size()), "varargs");
+      for (size_t k = 0; k < extra.size(); ++k) storeElement(arr, k, extra[k]);
+      slots[i] = abi_.callPtrI64(B_, "py_list_new", arr,
+                                B_.getInt64(static_cast<uint64_t>(extra.size())));
+    }
+  }
+  for (size_t i = 0; i < total; ++i) {
+    out.push_back(B_.CreateLoad(abi_.valueTy(), slots[i]));
+  }
+  if (out.size() != f->arg_size()) {
+    irError(e->line, e->col, "函数 '" + calleeName + "' 的参数个数与声明不一致");
+  }
+}
+
 Value *IRGen::genCall(const Call *e) {
   // 检查是否是内置模块调用: docker.run(...) / llm.chat(...) 等
   if (auto *attr = dynamic_cast<const Attribute *>(e->callee.get())) {
@@ -480,27 +590,132 @@ Value *IRGen::genCall(const Call *e) {
   if (name->id == "print") return genPrint(e);
   if (name->id == "len") return genLen(e);
   if (name->id == "gc_collect") return genGcCollect(e);
+  // 类名(...) —— 实例化
+  if (classMap_.count(name->id)) return genInstanceNew(name->id, e);
 
-  const std::string sym = symbolFor(name->id);
+  // 匿名函数:变量名绑定了内部函数时,解析成对该内部函数的直接调用。
+  std::string sym;
+  const std::vector<Param> *lamParams = nullptr;
+  auto lamIt = lambdaVars_.find(curFn_->getName().str() + "::" + name->id);
+  if (lamIt != lambdaVars_.end()) {
+    sym = lamIt->second;
+    auto dIt = lambdaDefs_.find(sym);
+    if (dIt != lambdaDefs_.end()) lamParams = &dIt->second->params;
+    auto nIt = nestedParams_.find(sym);
+    if (nIt != nestedParams_.end()) lamParams = nIt->second;
+  } else {
+    sym = symbolFor(name->id);
+  }
   Function *f = M_.getFunction(sym);
   if (!f) {
     irError(e->line, e->col, "调用了未定义的函数 '" + name->id + "'");
   }
 
-  // Linux: 无 sret 指针，参数个数直接等于用户参数个数
-  const size_t expected = f->arg_size();
-  if (e->args.size() != expected) {
-    irError(e->line, e->col,
-            "函数 '" + name->id + "' 需要 " + std::to_string(expected) +
-                " 个参数,给了 " + std::to_string(e->args.size()) + " 个");
-  }
-
   Value *ret = abi_.newSlot(B_, name->id + ".ret");
   std::vector<Value *> callArgs;
-  callArgs.reserve(e->args.size());
-  for (const auto &a : e->args) {
-    Value *slot = genExpr(a.get());
-    callArgs.push_back(B_.CreateLoad(abi_.valueTy(), slot));
+  callArgs.reserve(f->arg_size());
+  if (lamParams != nullptr) {
+    // 先传捕获的外层变量(与内部函数的前置参数一一对应),再绑实参。
+    auto capIt = lambdaCaptures_.find(sym);
+    if (capIt != lambdaCaptures_.end()) {
+      for (const auto &cn : capIt->second) {
+        AllocaInst *cs = lookupVar(cn);
+        if (cs != nullptr) {
+          callArgs.push_back(B_.CreateLoad(abi_.valueTy(), cs));
+        } else {
+          Value *ns = abi_.newSlot(B_, "cap.none");
+          abi_.storeNone(B_, ns);
+          callArgs.push_back(B_.CreateLoad(abi_.valueTy(), ns));
+        }
+      }
+    }
+    bindCallArgs(lamParams, e, f, name->id, callArgs);
+    Value *lval = B_.CreateCall(f, callArgs, name->id + ".r");
+    B_.CreateStore(lval, ret);
+    return ret;
+  }
+  // 有函数定义时按名字绑定:位置参数 -> 关键字参数 -> 缺省值 -> *args。
+  // 拿不到定义时(只声明未定义等)退回严格按位置匹配。
+  auto defIt = funcMap_.find(name->id);
+  if (defIt == funcMap_.end()) {
+    const size_t expected = f->arg_size();
+    if (e->args.size() != expected || !e->kwargs.empty()) {
+      irError(e->line, e->col,
+              "函数 '" + name->id + "' 需要 " + std::to_string(expected) +
+                  " 个参数,给了 " + std::to_string(e->args.size()) + " 个");
+    }
+    for (const auto &a : e->args) {
+      Value *slot = genExpr(a.get());
+      callArgs.push_back(B_.CreateLoad(abi_.valueTy(), slot));
+    }
+  } else {
+    const FuncDef *fd = defIt->second;
+    const size_t total = fd->params.size();
+    bool hasVararg = false;
+    for (size_t i = 0; i < total; ++i) {
+      if (fd->params[i].isVararg) hasVararg = true;
+    }
+    std::vector<Value *> slots(total, nullptr);
+    // 位置参数按顺序占前面的形参,遇到 *args 就停下
+    size_t pi = 0;
+    for (; pi < e->args.size() && pi < total; ++pi) {
+      if (fd->params[pi].isVararg) break;
+      slots[pi] = genExpr(e->args[pi].get());
+    }
+    // 关键字参数按名字绑定
+    for (const auto &kw : e->kwargs) {
+      size_t idx = total;
+      for (size_t i = 0; i < total; ++i) {
+        if (!fd->params[i].isVararg && fd->params[i].name == kw.first) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx == total) {
+        irError(e->line, e->col,
+                "函数 '" + name->id + "' 没有名为 '" + kw.first + "' 的参数");
+      }
+      if (slots[idx]) {
+        irError(e->line, e->col, "参数 '" + kw.first + "' 被重复传入");
+      }
+      slots[idx] = genExpr(kw.second.get());
+    }
+    // 剩余位置参数交给 *args;没有 *args 就是给多了
+    std::vector<Value *> extra;
+    for (; pi < e->args.size(); ++pi) extra.push_back(genExpr(e->args[pi].get()));
+    if (!extra.empty() && !hasVararg) {
+      irError(e->line, e->col, "函数 '" + name->id + "' 收到了多余的位置参数");
+    }
+    // 补缺省值 / 检查缺参
+    for (size_t i = 0; i < total; ++i) {
+      if (fd->params[i].isVararg || slots[i]) continue;
+      if (fd->params[i].defaultValue) {
+        slots[i] = genExpr(fd->params[i].defaultValue.get());
+      } else {
+        irError(e->line, e->col,
+                "函数 '" + name->id + "' 缺少必填参数 '" + fd->params[i].name + "'");
+      }
+    }
+    // *args 打包成列表
+    for (size_t i = 0; i < total; ++i) {
+      if (!fd->params[i].isVararg) continue;
+      if (extra.empty()) {
+        Value *np = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+        slots[i] = abi_.callPtrI64(B_, "py_list_new", np, B_.getInt64(0));
+      } else {
+        Value *arr =
+            abi_.newSlotArray(B_, static_cast<int64_t>(extra.size()), "varargs");
+        for (size_t k = 0; k < extra.size(); ++k) storeElement(arr, k, extra[k]);
+        slots[i] = abi_.callPtrI64(B_, "py_list_new", arr,
+                                  B_.getInt64(static_cast<uint64_t>(extra.size())));
+      }
+    }
+    for (size_t i = 0; i < total; ++i) {
+      callArgs.push_back(B_.CreateLoad(abi_.valueTy(), slots[i]));
+    }
+    if (callArgs.size() != f->arg_size()) {
+      irError(e->line, e->col, "函数 '" + name->id + "' 的参数个数与声明不一致");
+    }
   }
 
   Value *val = B_.CreateCall(f, callArgs, name->id + ".r");
@@ -602,8 +817,13 @@ void IRGen::genStmt(const Stmt *s) {
     return;
   }
   if (auto *x = dynamic_cast<const FuncDef *>(s)) {
-    // 函数定义在 generate() 的两趟流程里已经处理过了
-    (void)x;
+    // 顶层的函数定义在 generate() 的两趟流程里已经处理过;能走到这里的
+    // 都是写在函数体里的嵌套定义,单独提升。
+    genNestedFuncDef(x);
+    return;
+  }
+  if (dynamic_cast<const ClassDef *>(s)) {
+    // 类定义在 generate() 的趟次里已经处理过了
     return;
   }
 
@@ -626,6 +846,12 @@ void IRGen::genAssign(const Assign *s) {
       return;
     }
 
+    // 属性赋值 `obj.attr = v`:先算对象与右侧,再写属性。
+    if (auto *at = dynamic_cast<const Attribute *>(s->targets[0].get())) {
+      Value *val = genExpr(s->value.get());
+      genAttrSet(at, val);
+      return;
+    }
     Value *v = genExpr(s->value.get());
     auto *name = dynamic_cast<const Name *>(s->targets[0].get());
     if (!name) {
@@ -634,6 +860,20 @@ void IRGen::genAssign(const Assign *s) {
     AllocaInst *slot = lookupVar(name->id);
     if (!slot) slot = declareVar(name->id);
     abi_.copySlot(B_, slot, v);
+    traceVar(name->id, slot);
+    // 右侧是匿名函数:记下『该变量 -> 内部函数』,调用点据此解析成直接调用。
+    if (dynamic_cast<const Lambda *>(s->value.get()) && !lastLambdaSym_.empty()) {
+      lambdaVars_[curFn_->getName().str() + "::" + name->id] = lastLambdaSym_;
+      lastLambdaSym_.clear();
+    }
+    // 右侧是类名实例化:记下『该变量 -> 类』,后续 obj.m(...) 才能解析成方法调用。
+    if (auto *c = dynamic_cast<const Call *>(s->value.get())) {
+      if (auto *cn = dynamic_cast<const Name *>(c->callee.get())) {
+        if (classMap_.count(cn->id)) {
+          varClasses_[curFn_->getName().str() + "::" + name->id] = cn->id;
+        }
+      }
+    }
     return;
   }
 
@@ -906,6 +1146,95 @@ void IRGen::genForRange(const For *s, const RangeExpr *r) {
   B_.SetInsertPoint(exitBB);
 }
 
+// --- 插桩辅助 ---
+// 这些调用都走 py_trace_*;通信模块未启用时它们是空操作,成本极低。
+void IRGen::traceEnterFn(const std::string &name) {
+  if (!traceOn_) return;
+  // 帧标识槽位放在入口块最前面,与变量声明同一个约定。
+  if (traceFrameSlot_ == nullptr) {
+    BasicBlock &entry = curFn_->getEntryBlock();
+    IRBuilder<> tmp(&entry, entry.begin());
+    traceFrameSlot_ = tmp.CreateAlloca(abi_.i64Ty(), nullptr, "trace.frame");
+  }
+  GlobalVariable *gname = B_.CreateGlobalString(llvm::StringRef(name));
+  // py_trace_begin(const char*) -> i64:直接声明 —— callUnaryI64 对非 py_len
+  // 的函数会按 (PyValue)->i64 声明并加载 valueTy,参数类型对不上。
+  Function *beginFn = M_.getFunction("py_trace_begin");
+  if (beginFn == nullptr) {
+    beginFn = Function::Create(
+        FunctionType::get(abi_.i64Ty(), {abi_.ptrTy()}, false),
+        Function::ExternalLinkage, "py_trace_begin", M_);
+  }
+  Value *id = B_.CreateCall(beginFn, {gname}, "trace.id");
+  B_.CreateStore(id, traceFrameSlot_);
+}
+// 进入:附带形参名与实参值,面板显示为 combine(a=7, b=10)。
+void IRGen::traceEnterFnArgs(const std::string &name,
+                             const std::vector<std::string> &paramNames,
+                             const std::vector<llvm::Value *> &paramSlots) {
+  if (!traceOn_) return;
+  if (paramNames.empty()) { traceEnterFn(name); return; }
+  if (traceFrameSlot_ == nullptr) {
+    BasicBlock &entry = curFn_->getEntryBlock();
+    IRBuilder<> tmp(&entry, entry.begin());
+    traceFrameSlot_ = tmp.CreateAlloca(abi_.i64Ty(), nullptr, "trace.frame");
+  }
+  Type *ptrTy = abi_.ptrTy();
+  const size_t n = paramNames.size();
+
+  // 形参名:只读常量数组
+  std::vector<Constant *> namePtrs;
+  for (size_t i = 0; i < n; ++i)
+    namePtrs.push_back(B_.CreateGlobalString(llvm::StringRef(paramNames[i])));
+  ArrayType *nameArrTy = ArrayType::get(ptrTy, n);
+  Constant *nameArr = ConstantArray::get(nameArrTy, namePtrs);
+  GlobalVariable *gNameArr = new GlobalVariable(
+      M_, nameArrTy, true, GlobalValue::InternalLinkage, nameArr, "trace.argnames");
+
+  // 实参值:栈上指针数组,存放各参数槽位地址(运行时按 PyValue* 取值)。
+  // 注意:运行时接口的最后一参是 PyValue*const*,所以这里传的必须是
+  // 指针数组,不能是把值铺开的数组 —— 否则运行时会把首个值当成地址解引用。
+  AllocaInst *valsArr = B_.CreateAlloca(ArrayType::get(abi_.ptrTy(), n),
+                                        nullptr, "trace.argptrs");
+  for (size_t i = 0; i < n; ++i) {
+    Value *elemPtr = B_.CreateGEP(abi_.ptrTy(), valsArr,
+                                  B_.getInt64(static_cast<uint64_t>(i)));
+    B_.CreateStore(paramSlots[i], elemPtr);
+  }
+
+  Function *beginFn = M_.getFunction("py_trace_begin_args");
+  if (beginFn == nullptr) {
+    beginFn = Function::Create(
+        FunctionType::get(abi_.i64Ty(), {ptrTy, abi_.i32Ty(), ptrTy, ptrTy}, false),
+        Function::ExternalLinkage, "py_trace_begin_args", M_);
+  }
+  GlobalVariable *gname = B_.CreateGlobalString(llvm::StringRef(name));
+  Value *id = B_.CreateCall(
+      beginFn,
+      {gname, B_.getInt32(static_cast<int32_t>(n)), gNameArr, valsArr},
+      "trace.id");
+  B_.CreateStore(id, traceFrameSlot_);
+}
+void IRGen::traceExitFn(const std::string &name, bool ok) {
+  if (!traceOn_ || traceFrameSlot_ == nullptr) return;
+  // 帧标识槽位必须属于当前函数 —— lambda/嵌套函数生成期间会切换 curFn_,
+  // 误用外层函数的槽位会把外层函数错误上报为退出。
+  if (traceFrameSlot_->getFunction() != curFn_) return;
+  GlobalVariable *gname = B_.CreateGlobalString(llvm::StringRef(name));
+  Value *id = B_.CreateLoad(abi_.i64Ty(), traceFrameSlot_);
+  abi_.callVoidN(B_, "py_trace_end",
+                 {abi_.i64Ty(), abi_.ptrTy(), abi_.i32Ty()},
+                 {id, gname, B_.getInt32(ok ? 1 : 0)});
+}
+void IRGen::traceVar(const std::string &name, Value *slot) {
+  if (!traceOn_) return;
+  // py_trace_var_value(const char*, const PyValue*):由运行时负责 repr 转换,
+  // 编译器侧不用关心字符串怎么取、怎么保证 NUL 结尾 —— 全部收敛到这一个入口。
+  GlobalVariable *gname = B_.CreateGlobalString(llvm::StringRef(name));
+  abi_.callVoidN(B_, "py_trace_var_value",
+                 {abi_.ptrTy(), abi_.ptrTy()}, {gname, slot});
+}
+
 void IRGen::genReturn(const Return *s) {
   if (s->value) {
     Value *v = genExpr(s->value.get());
@@ -913,6 +1242,7 @@ void IRGen::genReturn(const Return *s) {
   } else {
     abi_.storeNone(B_, retSlot_);
   }
+  traceExitFn(curTraceName_, true);
   Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
   B_.CreateRet(retVal);
 }
@@ -935,11 +1265,27 @@ void IRGen::genFunction(const FuncDef *fd) {
   // Linux: 返回值槽改为本地 alloca，不再从 sret 参数获取
   retSlot_ = abi_.newSlot(B_, fd->name + ".ret");
 
-  // 参数按值传入，需要 store 到本地栈槽
+  // 插桩:记录带形参签名的函数名,重置帧槽位。
+  std::string traceDisplayName = fd->name + "(";
   for (size_t i = 0; i < fd->params.size(); ++i) {
-    AllocaInst *slot = declareVar(fd->params[i].first);
-    B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
+    if (i > 0) traceDisplayName += ", ";
+    traceDisplayName += fd->params[i].name;
   }
+  traceDisplayName += ")";
+  curTraceName_ = traceDisplayName;
+  traceFrameSlot_ = nullptr;
+
+  // 参数按值传入，需要 store 到本地栈槽;同时收集形参名与槽位用于进入上报。
+  std::vector<std::string> traceParamNames;
+  std::vector<Value *> traceParamSlots;
+  for (size_t i = 0; i < fd->params.size(); ++i) {
+    AllocaInst *slot = declareVar(fd->params[i].name);
+    B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
+    traceParamNames.push_back(fd->params[i].name);
+    traceParamSlots.push_back(slot);
+  }
+
+  traceEnterFnArgs(traceDisplayName, traceParamNames, traceParamSlots);
 
   // Python 的函数走到末尾会隐式返回 None。入口处先写一次 None,
   // 这样没有 return 的路径也有确定的结果。
@@ -947,6 +1293,7 @@ void IRGen::genFunction(const FuncDef *fd) {
 
   genBlock(fd->body);
   if (!B_.GetInsertBlock()->getTerminator()) {
+    traceExitFn(curTraceName_, true);
     Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
     B_.CreateRet(retVal);
   }
@@ -954,6 +1301,256 @@ void IRGen::genFunction(const FuncDef *fd) {
   scopes_.pop_back();
   curFn_ = nullptr;
   retSlot_ = nullptr;
+  traceFrameSlot_ = nullptr;
+  curTraceName_.clear();
+}
+
+// 匿名函数:值类型没有函数表示,所以这里把它"提升"成一个模块内部函数,
+// 并记下最近生成的符号。赋值语句据此把变量名绑定到该内部函数,调用点再
+// 把它解析成直接调用。全程只动编译期信息,不碰 PyValue 的布局。
+Value *IRGen::genLambdaExpr(const Lambda *lam) {
+  const std::string sym = "pylite_" + sanitize(moduleName_) + "_lambda" +
+                          std::to_string(lambdaCounter_++);
+  // 闭包捕获:把当前可见的外层变量记下来,作为内部函数的**前置参数**随调用传入。
+  // 这样匿名函数用到的外层数据就一起带进来了,不需要运行时环境对象,
+  // 也就不必给值类型新增函数表示。
+  // ⚠️ 采取"捕获当前可见的全部外层局部变量"这一偏保守的策略:不做自由变量分析,
+  // 多传几个用不上的参数,换取"绝不漏捕获"。
+  std::vector<std::string> caps;
+  if (!scopes_.empty()) {
+    for (const auto &kv : scopes_.back()) {
+      bool isParam = false;
+      for (const auto &p : lam->params) {
+        if (p.name == kv.first) { isParam = true; break; }
+      }
+      if (!isParam) caps.push_back(kv.first);
+    }
+  }
+  lambdaCaptures_[sym] = caps;
+  std::vector<Type *> params;
+  for (size_t i = 0; i < caps.size(); ++i) params.push_back(abi_.valueTy());
+  for (size_t i = 0; i < lam->params.size(); ++i) params.push_back(abi_.valueTy());
+  auto *ft = FunctionType::get(abi_.valueTy(), params, false);
+  auto *fn = Function::Create(ft, Function::InternalLinkage, sym, M_);
+  lambdaDefs_[sym] = lam;
+  lastLambdaSym_ = sym;
+  // 立刻生成函数体 —— 匿名函数出现在表达式位置,不参与顶层那两趟流程。
+  genLambdaDef(lam, fn);
+  // 求值结果本身没有运行时表示,给一个确定的值(None)。
+  Value *s = abi_.newSlot(B_, "lambda");
+  abi_.storeNone(B_, s);
+  return s;
+}
+
+// 匿名函数体。与具名函数走同一套参数绑定;生成期间要保存并恢复当前函数、
+// 返回槽与插入点,否则外层函数的后续语句会被写进匿名函数里。
+void IRGen::genLambdaDef(const Lambda *lam, Function *fn) {
+  Function *savedFn = curFn_;
+  Value *savedRet = retSlot_;
+  const auto savedIP = B_.saveIP();
+  curFn_ = fn;
+  scopes_.emplace_back();
+  BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", fn);
+  B_.SetInsertPoint(entry);
+  retSlot_ = abi_.newSlot(B_, "lambda.ret");
+  // 先绑捕获项(前置参数),再绑形参;顺序必须与调用点一致。
+  unsigned argBase = 0;
+  auto capIt = lambdaCaptures_.find(fn->getName().str());
+  if (capIt != lambdaCaptures_.end()) {
+    for (size_t i = 0; i < capIt->second.size(); ++i) {
+      AllocaInst *slot = declareVar(capIt->second[i]);
+      B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
+    }
+    argBase = static_cast<unsigned>(capIt->second.size());
+  }
+  for (size_t i = 0; i < lam->params.size(); ++i) {
+    AllocaInst *slot = declareVar(lam->params[i].name);
+    B_.CreateStore(fn->getArg(argBase + static_cast<unsigned>(i)), slot);
+  }
+  abi_.storeNone(B_, retSlot_);
+  genBlock(lam->body);
+  if (!B_.GetInsertBlock()->getTerminator()) {
+    Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
+    B_.CreateRet(retVal);
+  }
+  scopes_.pop_back();
+  curFn_ = savedFn;
+  retSlot_ = savedRet;
+  B_.restoreIP(savedIP);
+}
+
+// 嵌套函数:写在函数体里的 def。处理方式与匿名函数完全一致 ——
+// 提升为模块内部函数,并把外层变量作为前置参数捕获进来。
+void IRGen::genNestedFuncDef(const FuncDef *fd) {
+  const std::string sym = "pylite_" + sanitize(moduleName_) + "_lambda" +
+                          std::to_string(lambdaCounter_++);
+  std::vector<std::string> caps;
+  if (!scopes_.empty()) {
+    for (const auto &kv : scopes_.back()) {
+      bool isParam = false;
+      for (const auto &p : fd->params) {
+        if (p.name == kv.first) { isParam = true; break; }
+      }
+      if (!isParam) caps.push_back(kv.first);
+    }
+  }
+  lambdaCaptures_[sym] = caps;
+  nestedParams_[sym] = &fd->params;
+  std::vector<Type *> params;
+  for (size_t i = 0; i < caps.size(); ++i) params.push_back(abi_.valueTy());
+  for (size_t i = 0; i < fd->params.size(); ++i) params.push_back(abi_.valueTy());
+  auto *ft = FunctionType::get(abi_.valueTy(), params, false);
+  auto *fn = Function::Create(ft, Function::InternalLinkage, sym, M_);
+  // 把名字绑到内部函数:函数体内(含递归)调用 fd->name(...) 时据此解析。
+  lambdaVars_[curFn_->getName().str() + "::" + fd->name] = sym;
+  // 生成函数体。与匿名函数一样,要保存并恢复当前函数、返回槽与插入点。
+  Function *savedFn = curFn_;
+  Value *savedRet = retSlot_;
+  const auto savedIP = B_.saveIP();
+  curFn_ = fn;
+  scopes_.emplace_back();
+  BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", fn);
+  B_.SetInsertPoint(entry);
+  retSlot_ = abi_.newSlot(B_, "nested.ret");
+  for (size_t i = 0; i < caps.size(); ++i) {
+    AllocaInst *slot = declareVar(caps[i]);
+    B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
+  }
+  const unsigned argBase = static_cast<unsigned>(caps.size());
+  for (size_t i = 0; i < fd->params.size(); ++i) {
+    AllocaInst *slot = declareVar(fd->params[i].name);
+    B_.CreateStore(fn->getArg(argBase + static_cast<unsigned>(i)), slot);
+  }
+  abi_.storeNone(B_, retSlot_);
+  genBlock(fd->body);
+  if (!B_.GetInsertBlock()->getTerminator()) {
+    Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
+    B_.CreateRet(retVal);
+  }
+  scopes_.pop_back();
+  curFn_ = savedFn;
+  retSlot_ = savedRet;
+  B_.restoreIP(savedIP);
+}
+
+// 类定义:类信息已在 generate() 的第一趟登记,这里把每个成员方法生成成
+// 一个带实例参数的普通函数 —— 方法的第一个形参就是 self(由调用方传入实例)。
+// 这样方法体与普通函数完全同构,参数绑定、返回、循环控制全部复用既有逻辑。
+void IRGen::genClassDef(const ClassDef *cd) {
+  // 先声明所有方法,这样方法之间互相调用(含递归)不受定义顺序限制。
+  std::map<std::string, Function *> methodFns;
+  for (const auto &m : cd->methods) {
+    const std::string sym = "pylite_" + sanitize(moduleName_) + "_class_" +
+                            sanitize(cd->name) + "_" + sanitize(m->name);
+    // 方法的声明参数**就是它的形参列表** —— 代表实例的那个形参(惯例写 self)
+    // 本就在列表里,不能再额外加一个,否则声明与调用会差一个参数。
+    std::vector<Type *> params;
+    for (size_t i = 0; i < m->params.size(); ++i) params.push_back(abi_.valueTy());
+    auto *ft = FunctionType::get(abi_.valueTy(), params, false);
+    methodFns[m->name] = Function::Create(ft, Function::ExternalLinkage, sym, M_);
+  }
+  // 扫一遍方法体,登记 `self.X = SomeClass(...)` 这类"属性持有的实例类型"。
+  // 有了它,self.X.m(...) 这种组合结构上的方法调用才能解析出来。
+  for (const auto &m : cd->methods) {
+    for (const auto &st : m->body) {
+      auto *as = dynamic_cast<const Assign *>(st.get());
+      if (!as || as->targets.size() != 1) continue;
+      auto *at = dynamic_cast<const Attribute *>(as->targets[0].get());
+      if (!at) continue;
+      if (!dynamic_cast<const Name *>(at->obj.get())) continue;
+      auto *call = dynamic_cast<const Call *>(as->value.get());
+      if (!call) continue;
+      auto *cn = dynamic_cast<const Name *>(call->callee.get());
+      if (!cn) continue;
+      if (classMap_.count(cn->id)) {
+        classAttrClasses_[cd->name + "." + at->name] = cn->id;
+      }
+    }
+  }
+  // 再逐个生成方法体。要保存并恢复当前函数、返回槽与插入点。
+  for (const auto &m : cd->methods) {
+    Function *fn = methodFns[m->name];
+    Function *savedFn = curFn_;
+    Value *savedRet = retSlot_;
+    const auto savedIP = B_.saveIP();
+    curFn_ = fn;
+    scopes_.emplace_back();
+    BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", fn);
+    B_.SetInsertPoint(entry);
+    retSlot_ = abi_.newSlot(B_, m->name + ".ret");
+    // 按约定,第一个形参写 self;它与第一个实参(实例)天然对应。
+    for (size_t i = 0; i < m->params.size(); ++i) {
+      AllocaInst *slot = declareVar(m->params[i].name);
+      B_.CreateStore(fn->getArg(static_cast<unsigned>(i)), slot);
+    }
+    // 方法体里的第一个形参(惯例写 self)指向本类实例;据此把 obj.m(...)
+    // 解析成对类方法的直接调用。按形参名记录,不硬编码 self 这个写法。
+    if (!m->params.empty()) {
+      varClasses_[fn->getName().str() + "::" + m->params[0].name] = cd->name;
+    }
+    abi_.storeNone(B_, retSlot_);
+    genBlock(m->body);
+    if (!B_.GetInsertBlock()->getTerminator()) {
+      Value *retVal = B_.CreateLoad(abi_.valueTy(), retSlot_);
+      B_.CreateRet(retVal);
+    }
+    scopes_.pop_back();
+    curFn_ = savedFn;
+    retSlot_ = savedRet;
+    B_.restoreIP(savedIP);
+  }
+}
+
+// 实例化:类名(...)。先建一张空属性字典,交给运行时造出实例;
+// 若该类定义了 __init__,再把实例作为 self、连同实参一起调用它。
+Value *IRGen::genInstanceNew(const std::string &className, const Call *e) {
+  auto idIt = classIds_.find(className);
+  if (idIt == classIds_.end()) {
+    irError(e->line, e->col, "未定义的类 '" + className + "'");
+  }
+  Value *np = ConstantPointerNull::get(cast<PointerType>(abi_.ptrTy()));
+  Value *attrs = abi_.callN(B_, "py_dict_new",
+                            {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty()},
+                            {np, np, B_.getInt64(0)});
+  Value *inst = abi_.callN(B_, "py_instance_new", {abi_.i64Ty(), abi_.ptrTy()},
+                           {B_.getInt64(idIt->second), attrs});
+  auto cm = classMap_.find(className);
+  if (cm != classMap_.end()) {
+    for (const auto &m : cm->second->methods) {
+      if (m->name != "__init__") continue;
+      const std::string sym = "pylite_" + sanitize(moduleName_) + "_class_" +
+                              sanitize(className) + "___init__";
+      Function *f = M_.getFunction(sym);
+      if (f == nullptr) break;
+      std::vector<Value *> callArgs;
+      callArgs.push_back(B_.CreateLoad(abi_.valueTy(), inst));
+      for (const auto &a : e->args) {
+        Value *s = genExpr(a.get());
+        callArgs.push_back(B_.CreateLoad(abi_.valueTy(), s));
+      }
+      B_.CreateCall(f, callArgs);
+      break;
+    }
+  }
+  return inst;
+}
+
+// 属性取值:obj.attr
+Value *IRGen::genAttrGet(const Attribute *a) {
+  Value *obj = genExpr(a->obj.get());
+  GlobalVariable *name = B_.CreateGlobalString(llvm::StringRef(a->name));
+  return abi_.callN(B_, "py_instance_get_attr",
+                    {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty()},
+                    {obj, name, B_.getInt64(static_cast<int64_t>(a->name.size()))});
+}
+
+// 属性赋值:obj.attr = v
+void IRGen::genAttrSet(const Attribute *a, Value *val) {
+  Value *obj = genExpr(a->obj.get());
+  GlobalVariable *name = B_.CreateGlobalString(llvm::StringRef(a->name));
+  abi_.callVoidN(B_, "py_instance_set_attr",
+                 {abi_.ptrTy(), abi_.ptrTy(), abi_.i64Ty(), abi_.ptrTy()},
+                 {obj, name, B_.getInt64(static_cast<int64_t>(a->name.size())), val});
 }
 
 void IRGen::genTopLevel(const Module &ast) {
@@ -968,13 +1565,38 @@ void IRGen::genTopLevel(const Module &ast) {
   BasicBlock *entry = BasicBlock::Create(Ctx_, "entry", fn);
   B_.SetInsertPoint(entry);
 
+  // 插桩:先把事件落盘路径挂上,再启动 SSE 服务(18900)。
+  if (traceOn_) {
+    Function *dumpFn = M_.getFunction("py_trace_set_dump");
+    if (dumpFn == nullptr) {
+      dumpFn = Function::Create(
+          FunctionType::get(abi_.voidTy(), {abi_.ptrTy()}, false),
+          Function::ExternalLinkage, "py_trace_set_dump", M_);
+    }
+    GlobalVariable *dumpPath = B_.CreateGlobalString(
+        llvm::StringRef("/tmp/pylite_trace/events.sse"));
+    B_.CreateCall(dumpFn, {dumpPath});
+    Function *startFn = M_.getFunction("py_trace_start");
+    if (startFn == nullptr) {
+      startFn = Function::Create(
+          FunctionType::get(abi_.voidTy(), {abi_.i32Ty()}, false),
+          Function::ExternalLinkage, "py_trace_start", M_);
+    }
+    B_.CreateCall(startFn, {B_.getInt32(18900)});
+  }
+
   for (const auto &s : ast.body) {
     if (dynamic_cast<const FuncDef *>(s.get())) continue;  // 已单独生成
+    if (dynamic_cast<const ClassDef *>(s.get())) continue; // 类已单独生成
     if (B_.GetInsertBlock()->getTerminator()) {
       BasicBlock *dead = BasicBlock::Create(Ctx_, "dead", fn);
       B_.SetInsertPoint(dead);
     }
     genStmt(s.get());
+  }
+  // 插桩:停掉 SSE 服务并关闭落盘文件。
+  if (traceOn_) {
+    abi_.callVoidN(B_, "py_trace_stop", {}, {});
   }
   if (!B_.GetInsertBlock()->getTerminator()) B_.CreateRetVoid();
 
@@ -983,6 +1605,16 @@ void IRGen::genTopLevel(const Module &ast) {
 }
 
 void IRGen::generate(const Module &ast) {
+  // 第零趟:先登记所有类。类要排在函数之前 —— 任何函数都可能实例化某个类。
+  for (const auto &s : ast.body) {
+    auto *cd = dynamic_cast<const ClassDef *>(s.get());
+    if (!cd) continue;
+    if (classMap_.count(cd->name)) {
+      irError(cd->line, cd->col, "类 '" + cd->name + "' 重复定义");
+    }
+    classMap_[cd->name] = cd;
+    classIds_[cd->name] = classCounter_++;   // 每个类一个整数标识
+  }
   // 第一趟:登记所有用户函数的签名。
   // 必须先做这一趟,否则调用点无法知道参数个数,而且函数之间的相互调用
   // (包括递归)在定义顺序上会受限制。
@@ -995,6 +1627,7 @@ void IRGen::generate(const Module &ast) {
       irError(fd->line, fd->col, "函数 '" + fd->name + "' 重复定义");
     }
     funcs_.push_back(fd);
+    funcMap_[fd->name] = fd;   // 调用点用它重排关键字参数、补默认值、打包 *args
 
     std::vector<Type *> params;
     for (size_t i = 0; i < fd->params.size(); ++i) params.push_back(abi_.valueTy());
@@ -1008,6 +1641,10 @@ void IRGen::generate(const Module &ast) {
     if (auto *fd = dynamic_cast<const FuncDef *>(s.get())) genFunction(fd);
   }
 
+  // 补上类的方法体(类已在上面的趟次里登记)
+  for (const auto &s : ast.body) {
+    if (auto *cd = dynamic_cast<const ClassDef *>(s.get())) genClassDef(cd);
+  }
   // 顶层语句
   genTopLevel(ast);
 }

@@ -30,6 +30,9 @@ const char *tokName(Tok t) {
     case Tok::KwTrue:    return "True";
     case Tok::KwFalse:   return "False";
     case Tok::KwNone:    return "None";
+    case Tok::KwLambda:  return "lambda";
+    case Tok::KwClass:   return "class";
+    case Tok::KwSelf:    return "self";   // 已不产出,保留以维持枚举完整
     case Tok::KwBreak:   return "break";
     case Tok::KwContinue:return "continue";
     case Tok::KwInt:     return "int";
@@ -259,6 +262,8 @@ void Lexer::lexIdentifier() {
       {"break", Tok::KwBreak},   {"continue", Tok::KwContinue},
       {"int", Tok::KwInt},       {"float", Tok::KwFloat},
       {"bool", Tok::KwBool},     {"str", Tok::KwStr},
+      {"lambda", Tok::KwLambda},
+      {"class", Tok::KwClass},
   };
 
   auto it = kKeywords.find(text);

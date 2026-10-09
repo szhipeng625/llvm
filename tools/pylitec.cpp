@@ -15,6 +15,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -26,7 +27,8 @@ void usage() {
                "用法: pylitec <输入.pys> -o <输出.o> [-I 名称] [--emit-ir <输出.ll>]\n"
                "\n"
                "  -I <名称>        指定模块名(默认取输入文件的主文件名)\n"
-               "  --emit-ir <路径> 同时把 LLVM IR 文本写出来,便于检查代码生成\n");
+               "  --emit-ir <路径> 同时把 LLVM IR 文本写出来,便于检查代码生成\n"
+               "  --trace          插入运行时插桩:函数计时/变量上报,经 SSE(18900) 推送并落盘\n");
 }
 
 // 从 "path/to/foo.pys" 取出 "foo"
@@ -43,6 +45,7 @@ std::string moduleNameFromPath(const std::string &path) {
 int main(int argc, char **argv) {
   std::string input, output, emitIRPath, moduleName;
   bool haveOutput = false;
+  bool trace = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -56,6 +59,8 @@ int main(int argc, char **argv) {
     } else if (a == "--emit-ir") {
       if (++i >= argc) { usage(); return 2; }
       emitIRPath = argv[i];
+    } else if (a == "--trace") {
+      trace = true;
     } else if (a == "-h" || a == "--help") {
       usage();
       return 0;
@@ -95,6 +100,14 @@ int main(int argc, char **argv) {
     llvm::LLVMContext ctx;
     auto module = std::make_unique<llvm::Module>(moduleName, ctx);
     pylite::IRGen gen(*module, moduleName);
+    gen.setTrace(trace);
+    if (trace) {
+      // 运行时只负责 fopen(\"w\"),目录要由驱动侧先建好;建失败也不致命,
+      // 落盘会静默缺席,但 SSE 推送仍然可用。
+      if (std::system("mkdir -p /tmp/pylite_trace") != 0) {
+        std::fprintf(stderr, "警告: 无法创建 /tmp/pylite_trace,事件落盘不可用\n");
+      }
+    }
     gen.generate(*ast);
 
     // 出目标文件之前先验证 IR。这一步能把"前端生成的 IR 本身就不合法"

@@ -39,6 +39,11 @@ class Parser {
   StmtPtr parseStmt();
   StmtPtr parseSimpleStmt();               // 赋值 / 表达式语句(到 NEWLINE 为止)
   StmtPtr parseFuncDef();
+  // 类定义:class 名字[(父类)]: 后跟若干成员方法。
+  StmtPtr parseClassDef();
+  // 形参列表:(name[:type] [= default] | *args) —— 供函数定义与匿名函数共用。
+  // allowTypes=false 时不吃冒号:匿名函数的冒号是函数体的分隔符,不是类型注解。
+  std::vector<Param> parseParams(bool allowTypes = true);
   StmtPtr parseIf();
   StmtPtr parseWhile();
   StmtPtr parseFor();
@@ -59,6 +64,8 @@ class Parser {
   ExprPtr parsePower();
   ExprPtr parsePostfix();
   ExprPtr parseAtom();
+  // lambda 形参: 单表达式体,解析后包成一条 return
+  ExprPtr parseLambda();
 
   // a[...] 的两种形态:下标 a[i] 或切片 a[lo:hi:step]
   ExprPtr parseSubscriptOf(ExprPtr obj);

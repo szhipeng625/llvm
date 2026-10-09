@@ -30,6 +30,8 @@ enum class Tok : uint8_t {
   KwWhile, KwFor, KwIn,
   KwAnd, KwOr, KwNot,
   KwTrue, KwFalse, KwNone,
+  KwLambda,
+  KwClass, KwSelf,
   KwBreak, KwContinue,
   // 类型名。input(int, int) 里的 int 走这个 token;
   // 同时它们也是合法的类型注解。

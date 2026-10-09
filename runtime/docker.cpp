@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <chrono>
 
 namespace {
 
@@ -64,6 +65,7 @@ extern "C" PyValue py_docker_run(const PyValue *image, const PyValue *cmd) {
   if (image->tag != PY_STR || cmd->tag != PY_STR) {
     py_runtime_error("docker_run() 需要两个字符串参数: image, command");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *img = py_str_data(image);
   const char *command = py_str_data(cmd);
@@ -102,6 +104,9 @@ extern "C" PyValue py_docker_run(const PyValue *image, const PyValue *cmd) {
   }
 
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "run", img, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -109,6 +114,7 @@ extern "C" PyValue py_docker_run(const PyValue *image, const PyValue *cmd) {
 // docker_ps() -> str
 // 列出正在运行的容器，返回 docker ps 的输出。
 extern "C" PyValue py_docker_ps() {
+  auto traceT0 = std::chrono::steady_clock::now();
   char *output = captureCommand("docker ps 2>&1");
   if (!output) {
     py_runtime_error("docker ps 失败: 无法执行 docker 命令");
@@ -116,6 +122,9 @@ extern "C" PyValue py_docker_ps() {
 
   trimNewline(output);
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "ps", "", 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -126,6 +135,7 @@ extern "C" void py_docker_stop(const PyValue *containerId) {
   if (containerId->tag != PY_STR) {
     py_runtime_error("docker_stop() 需要一个字符串参数: container_id");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *cid = py_str_data(containerId);
   int64_t cidLen = py_str_size(containerId);
@@ -147,6 +157,9 @@ extern "C" void py_docker_stop(const PyValue *containerId) {
       free(output);
       py_runtime_error(errBuf);
     }
+    py_trace_op("docker", "stop", cid, 1,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - traceT0).count());
     free(output);
   }
 }
@@ -157,6 +170,7 @@ extern "C" PyValue py_docker_logs(const PyValue *containerId) {
   if (containerId->tag != PY_STR) {
     py_runtime_error("docker_logs() 需要一个字符串参数: container_id");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *cid = py_str_data(containerId);
   int64_t cidLen = py_str_size(containerId);
@@ -177,6 +191,9 @@ extern "C" PyValue py_docker_logs(const PyValue *containerId) {
 
   trimNewline(output);
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "logs", cid, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -187,6 +204,7 @@ extern "C" PyValue py_docker_pull(const PyValue *image) {
   if (image->tag != PY_STR) {
     py_runtime_error("docker_pull() 需要一个字符串参数: image");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *img = py_str_data(image);
   int64_t imgLen = py_str_size(image);
@@ -207,6 +225,9 @@ extern "C" PyValue py_docker_pull(const PyValue *image) {
 
   trimNewline(output);
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "pull", img, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -229,6 +250,7 @@ extern "C" PyValue py_docker_generate_dockerfile(const PyValue *baseImage,
     py_runtime_error(
       "docker_generate_dockerfile() 需要字符串参数: base_image, project_name, entrypoint");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *img = py_str_data(baseImage);
   const char *name = py_str_data(projectName);
@@ -287,6 +309,9 @@ extern "C" PyValue py_docker_generate_dockerfile(const PyValue *baseImage,
     static_cast<int>(entryLen), entry);
 
   PyValue result = py_str_new(dockerfile, static_cast<int64_t>(n));
+  py_trace_op("docker", "generate_dockerfile", name, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(dockerfile);
   return result;
 }
@@ -302,6 +327,7 @@ extern "C" PyValue py_docker_build(const PyValue *dockerfile,
     py_runtime_error(
       "docker_build() 需要字符串参数: image_name, tag, context_dir");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *df = (dockerfile->tag == PY_STR) ? py_str_data(dockerfile) : "";
   const char *name = py_str_data(imageName);
@@ -356,6 +382,9 @@ extern "C" PyValue py_docker_build(const PyValue *dockerfile,
 
   trimNewline(output);
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "build", name, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -368,6 +397,7 @@ extern "C" PyValue py_docker_push(const PyValue *imageName,
   if (imageName->tag != PY_STR || tag->tag != PY_STR) {
     py_runtime_error("docker_push() 需要字符串参数: image_name, tag");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   const char *name = py_str_data(imageName);
   const char *t = py_str_data(tag);
@@ -423,6 +453,9 @@ extern "C" PyValue py_docker_push(const PyValue *imageName,
 
   trimNewline(output);
   PyValue result = py_str_new(output, static_cast<int64_t>(strlen(output)));
+  py_trace_op("docker", "push", name, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(output);
   return result;
 }
@@ -445,6 +478,7 @@ extern "C" PyValue py_docker_project_package(const PyValue *projectDir,
       "docker_project_package() 需要字符串参数: "
       "project_dir, image_name, tag, base_image, entrypoint");
   }
+  auto traceT0 = std::chrono::steady_clock::now();
 
   PyValue df = py_docker_generate_dockerfile(baseImage, imageName,
                                               setupCommands, entrypoint,
@@ -499,6 +533,9 @@ extern "C" PyValue py_docker_project_package(const PyValue *projectDir,
   free(dfPath);
 
   PyValue result = py_str_new(summary, static_cast<int64_t>(strlen(summary)));
+  py_trace_op("docker", "project_package", imgName, 1,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - traceT0).count());
   free(summary);
   return result;
 }

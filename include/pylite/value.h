@@ -23,6 +23,13 @@ enum PyTag : int32_t {
   PY_LIST   = 5,
   PY_DICT   = 6,
   PY_TUPLE  = 7,
+  // 闭包:payload 指向 PyClosure(函数指针 + 捕获的环境)。
+  // 只新增一个种类编号,**不改变 PyValue 的大小与字段偏移**(tag 仍是 i32,
+  // union 里本就有指针),所以已编译的目标文件不受影响。
+  PY_FUNC   = 8,
+  // 类实例:payload 指向 PyInstance(类标识 + 属性表)。
+  // 同样只新增编号,PyValue 的大小与字段偏移不变。
+  PY_INSTANCE = 9,
 };
 
 struct PyStr;

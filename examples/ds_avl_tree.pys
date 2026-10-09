@@ -1,0 +1,140 @@
+# 平衡树:AVL 树(自平衡二叉搜索树)。
+#
+# 核心保证:任意节点的左右子树高度差不超过 1。
+# 插入后沿回溯路径更新高度,若失衡就按四种情形之一旋转:
+#   LL -> 单次右旋
+#   RR -> 单次左旋
+#   LR -> 先左旋再右旋
+#   RL -> 先右旋再左旋
+# 这样树高保持在 O(log n),查找、插入都是 O(log n)。
+#
+# 节点也是类实例:key 是值,left/right 是子节点(没有则为 None),h 是高度。
+
+class Node:
+    def __init__(self, key):
+        self.key = key
+        self.left = None
+        self.right = None
+        self.h = 1
+
+class AVL:
+    def __init__(self):
+        self.root = None
+
+    # 空节点高度记 0,这样叶子节点的高度是 1
+    def node_h(self, n):
+        if n == None:
+            return 0
+        return n.h
+
+    # 左右子树取较高者加一
+    def fix_h(self, n):
+        lh = self.node_h(n.left)
+        rh = self.node_h(n.right)
+        if lh > rh:
+            n.h = lh + 1
+        else:
+            n.h = rh + 1
+
+    # 平衡因子 = 左高 - 右高
+    def balance_of(self, n):
+        return self.node_h(n.left) - self.node_h(n.right)
+
+    # 右旋:左孩子升为新的子树根
+    def rotate_right(self, n):
+        l = n.left
+        n.left = l.right
+        l.right = n
+        self.fix_h(n)
+        self.fix_h(l)
+        return l
+
+    # 左旋:右孩子升为新的子树根
+    def rotate_left(self, n):
+        r = n.right
+        n.right = r.left
+        r.left = n
+        self.fix_h(n)
+        self.fix_h(r)
+        return r
+
+    def insert(self, key):
+        self.root = self.do_insert(self.root, key)
+
+    def do_insert(self, n, key):
+        if n == None:
+            return Node(key)
+        if key < n.key:
+            n.left = self.do_insert(n.left, key)
+        elif key > n.key:
+            n.right = self.do_insert(n.right, key)
+        else:
+            return n
+        self.fix_h(n)
+        b = self.balance_of(n)
+        # 左子树偏高
+        if b > 1:
+            if key < n.left.key:
+                return self.rotate_right(n)
+            else:
+                n.left = self.rotate_left(n.left)
+                return self.rotate_right(n)
+        # 右子树偏高
+        if b < -1:
+            if key > n.right.key:
+                return self.rotate_left(n)
+            else:
+                n.right = self.rotate_right(n.right)
+                return self.rotate_left(n)
+        return n
+
+    def find(self, key):
+        return self.do_find(self.root, key)
+
+    def do_find(self, n, key):
+        if n == None:
+            return False
+        if key == n.key:
+            return True
+        if key < n.key:
+            return self.do_find(n.left, key)
+        return self.do_find(n.right, key)
+
+    def inorder(self):
+        out = []
+        self.do_inorder(self.root, out)
+        return out
+
+    def do_inorder(self, n, out):
+        if n == None:
+            return
+        self.do_inorder(n.left, out)
+        out.append(n.key)
+        self.do_inorder(n.right, out)
+
+    # 逐节点校验平衡因子,全部在 -1..1 之间才算合格
+    def is_balanced(self):
+        return self.check(self.root)
+
+    def check(self, n):
+        if n == None:
+            return True
+        b = self.balance_of(n)
+        if b > 1 or b < -1:
+            return False
+        if not self.check(n.left):
+            return False
+        return self.check(n.right)
+
+    def tree_h(self):
+        return self.node_h(self.root)
+
+# --- 自测 ---
+t = AVL()
+for k in [50, 30, 70, 20, 40, 60, 80, 10, 5, 25, 35, 45]:
+    t.insert(k)
+print(t.inorder())
+print(t.tree_h())
+print(t.is_balanced())
+print(t.find(35))
+print(t.find(99))

@@ -106,6 +106,15 @@ void Call::dump(std::ostream &os, int indent) const {
     os << "args:\n";
     for (const auto &a : args) a->dump(os, indent + 2);
   }
+  if (!kwargs.empty()) {
+    pad(os, indent + 1);
+    os << "kwargs:\n";
+    for (const auto &kw : kwargs) {
+      pad(os, indent + 2);
+      os << kw.first << " =\n";
+      kw.second->dump(os, indent + 3);
+    }
+  }
 }
 
 void RangeExpr::dump(std::ostream &os, int indent) const {
@@ -290,20 +299,50 @@ void Continue::dump(std::ostream &os, int indent) const {
   os << "Continue\n";
 }
 
+// 形参列表的共用打印:函数定义与匿名函数都用它。
+// 默认值与可变参数都显式标出来,便于核对解析结果。
+static void dumpParams(std::ostream &os, const std::vector<Param> &params) {
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (i) os << ", ";
+    if (params[i].isVararg) os << "*";
+    os << params[i].name;
+    if (params[i].type != TypeName::Any) os << ": " << typeNameStr(params[i].type);
+    if (params[i].defaultValue) os << "=<默认值>";
+  }
+}
+
 void FuncDef::dump(std::ostream &os, int indent) const {
   pad(os, indent);
   os << "FuncDef " << name << "(";
-  for (size_t i = 0; i < params.size(); ++i) {
-    if (i) os << ", ";
-    os << params[i].first;
-    if (params[i].second != TypeName::Any) os << ": " << typeNameStr(params[i].second);
-  }
+  dumpParams(os, params);
   os << ")";
   if (retType != TypeName::Any) os << " -> " << typeNameStr(retType);
   os << "\n";
   pad(os, indent + 1);
   os << "body:\n";
   dumpBlock(os, indent + 2, body);
+}
+
+void Lambda::dump(std::ostream &os, int indent) const {
+  pad(os, indent);
+  os << "Lambda(";
+  dumpParams(os, params);
+  os << ")\n";
+  pad(os, indent + 1);
+  os << "body:\n";
+  dumpBlock(os, indent + 2, body);
+}
+
+void ClassDef::dump(std::ostream &os, int indent) const {
+  pad(os, indent);
+  os << "Class " << name;
+  if (!baseName.empty()) os << " : " << baseName;
+  os << "\n";
+  for (const auto &m : methods) {
+    pad(os, indent + 1);
+    os << "method:\n";
+    m->dump(os, indent + 2);
+  }
 }
 
 void Module::dump(std::ostream &os) const {

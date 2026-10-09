@@ -1,0 +1,345 @@
+# 映射(有序字典):底层直接用红黑树承载。
+#
+# 相比内置的字典(线性扫描、查找 O(n)),这里的映射是"键有序"的:
+#   * 查找、插入、删除都是 O(log n)
+#   * keys() 天然按序返回,不需要额外排序
+#   * 可以按区间取键(见 between)
+#
+# 实现上是把操作转发给内部那棵红黑树 —— 一个实例持有另一个实例,
+# 这正是"组合"的用法。
+#
+# 注意:当前一个源文件就是一个编译单元,文件之间不共享类型定义,
+# 所以红黑树的定义直接并进本文件,让这份实现自包含。
+
+# === 红黑树(与 ds_rb_tree.pys 同一实现,此处内联复用) ===
+
+class RBNode:
+    def __init__(self, key, val):
+        self.key = key
+        self.val = val
+        self.red = True
+        self.left = None
+        self.right = None
+        self.parent = None
+
+class RBTree:
+    def __init__(self):
+        self.nil = RBNode(0, 0)
+        self.nil.red = False
+        self.nil.left = self.nil
+        self.nil.right = self.nil
+        self.nil.parent = self.nil
+        self.root = self.nil
+        self.count = 0
+
+    def left_rotate(self, x):
+        y = x.right
+        x.right = y.left
+        if y.left != self.nil:
+            y.left.parent = x
+        y.parent = x.parent
+        if x.parent == self.nil:
+            self.root = y
+        elif x == x.parent.left:
+            x.parent.left = y
+        else:
+            x.parent.right = y
+        y.left = x
+        x.parent = y
+
+    def right_rotate(self, x):
+        y = x.left
+        x.left = y.right
+        if y.right != self.nil:
+            y.right.parent = x
+        y.parent = x.parent
+        if x.parent == self.nil:
+            self.root = y
+        elif x == x.parent.left:
+            x.parent.left = y
+        else:
+            x.parent.right = y
+        y.right = x
+        x.parent = y
+
+    def insert(self, key, val):
+        z = RBNode(key, val)
+        z.left = self.nil
+        z.right = self.nil
+        y = self.nil
+        x = self.root
+        while x != self.nil:
+            y = x
+            if key < x.key:
+                x = x.left
+            elif key > x.key:
+                x = x.right
+            else:
+                x.val = val
+                return False
+        z.parent = y
+        if y == self.nil:
+            self.root = z
+        elif key < y.key:
+            y.left = z
+        else:
+            y.right = z
+        z.red = True
+        self.count = self.count + 1
+        self.fix_after_insert(z)
+        return True
+
+    def fix_after_insert(self, z):
+        while z.parent.red:
+            if z.parent == z.parent.parent.left:
+                u = z.parent.parent.right
+                if u.red:
+                    z.parent.red = False
+                    u.red = False
+                    z.parent.parent.red = True
+                    z = z.parent.parent
+                else:
+                    if z == z.parent.right:
+                        z = z.parent
+                        self.left_rotate(z)
+                    z.parent.red = False
+                    z.parent.parent.red = True
+                    self.right_rotate(z.parent.parent)
+            else:
+                u = z.parent.parent.left
+                if u.red:
+                    z.parent.red = False
+                    u.red = False
+                    z.parent.parent.red = True
+                    z = z.parent.parent
+                else:
+                    if z == z.parent.left:
+                        z = z.parent
+                        self.right_rotate(z)
+                    z.parent.red = False
+                    z.parent.parent.red = True
+                    self.left_rotate(z.parent.parent)
+        self.root.red = False
+
+    def find_node(self, key):
+        x = self.root
+        while x != self.nil:
+            if key == x.key:
+                return x
+            if key < x.key:
+                x = x.left
+            else:
+                x = x.right
+        return self.nil
+
+    def get(self, key):
+        n = self.find_node(key)
+        if n == self.nil:
+            return None
+        return n.val
+
+    def has(self, key):
+        return self.find_node(key) != self.nil
+
+    def delete(self, key):
+        z = self.find_node(key)
+        if z == self.nil:
+            return False
+        self.delete_node(z)
+        self.count = self.count - 1
+        return True
+
+    def transplant(self, u, v):
+        if u.parent == self.nil:
+            self.root = v
+        elif u == u.parent.left:
+            u.parent.left = v
+        else:
+            u.parent.right = v
+        v.parent = u.parent
+
+    def minimum(self, n):
+        while n.left != self.nil:
+            n = n.left
+        return n
+
+    def delete_node(self, z):
+        y = z
+        y_red = y.red
+        if z.left == self.nil:
+            x = z.right
+            self.transplant(z, z.right)
+        elif z.right == self.nil:
+            x = z.left
+            self.transplant(z, z.left)
+        else:
+            y = self.minimum(z.right)
+            y_red = y.red
+            x = y.right
+            if y.parent == z:
+                x.parent = y
+            else:
+                self.transplant(y, y.right)
+                y.right = z.right
+                y.right.parent = y
+            self.transplant(z, y)
+            y.left = z.left
+            y.left.parent = y
+            y.red = z.red
+        if not y_red:
+            self.fix_after_delete(x)
+
+    def fix_after_delete(self, x):
+        while x != self.root and not x.red:
+            if x == x.parent.left:
+                w = x.parent.right
+                if w.red:
+                    w.red = False
+                    x.parent.red = True
+                    self.left_rotate(x.parent)
+                    w = x.parent.right
+                if not w.left.red and not w.right.red:
+                    w.red = True
+                    x = x.parent
+                else:
+                    if not w.right.red:
+                        w.left.red = False
+                        w.red = True
+                        self.right_rotate(w)
+                        w = x.parent.right
+                    w.red = x.parent.red
+                    x.parent.red = False
+                    w.right.red = False
+                    self.left_rotate(x.parent)
+                    x = self.root
+            else:
+                w = x.parent.left
+                if w.red:
+                    w.red = False
+                    x.parent.red = True
+                    self.right_rotate(x.parent)
+                    w = x.parent.left
+                if not w.left.red and not w.right.red:
+                    w.red = True
+                    x = x.parent
+                else:
+                    if not w.left.red:
+                        w.right.red = False
+                        w.red = True
+                        self.left_rotate(w)
+                        w = x.parent.left
+                    w.red = x.parent.red
+                    x.parent.red = False
+                    w.left.red = False
+                    self.right_rotate(x.parent)
+                    x = self.root
+        x.red = False
+
+    def inorder(self):
+        out = []
+        self.walk(self.root, out)
+        return out
+
+    def walk(self, n, out):
+        if n == self.nil:
+            return
+        self.walk(n.left, out)
+        out.append(n.key)
+        self.walk(n.right, out)
+
+    def check_props(self):
+        if self.root.red:
+            return False
+        if self.root == self.nil:
+            return True
+        if self.root.parent != self.nil:
+            return False
+        return self.black_height(self.root) > 0
+
+    def black_height(self, n):
+        if n == self.nil:
+            return 1
+        lh = self.black_height(n.left)
+        rh = self.black_height(n.right)
+        if lh == 0 or rh == 0 or lh != rh:
+            return 0
+        if n.red and (n.left.red or n.right.red):
+            return 0
+        if n.red:
+            return lh
+        return lh + 1
+
+# === 映射:把操作转发给内部那棵红黑树 ===
+
+class Map:
+    def __init__(self):
+        self.tree = RBTree()
+
+    def put(self, key, val):
+        return self.tree.insert(key, val)
+
+    def get(self, key):
+        return self.tree.get(key)
+
+    def get_or(self, key, fallback):
+        v = self.tree.get(key)
+        if v == None:
+            return fallback
+        return v
+
+    def has(self, key):
+        return self.tree.has(key)
+
+    def remove(self, key):
+        return self.tree.delete(key)
+
+    def size(self):
+        return self.tree.count
+
+    def empty(self):
+        return self.tree.count == 0
+
+    def keys(self):
+        return self.tree.inorder()
+
+    def between(self, lo, hi):
+        out = []
+        for k in self.tree.inorder():
+            if k >= lo and k <= hi:
+                out.append(k)
+        return out
+
+    def first_key(self):
+        ks = self.tree.inorder()
+        if len(ks) == 0:
+            return None
+        return ks[0]
+
+    def last_key(self):
+        ks = self.tree.inorder()
+        if len(ks) == 0:
+            return None
+        return ks[len(ks) - 1]
+
+# --- 自测 ---
+m = Map()
+m.put(5, "five")
+m.put(3, "three")
+m.put(8, "eight")
+m.put(1, "one")
+m.put(9, "nine")
+m.put(7, "seven")
+print(m.size())
+print(m.keys())
+print(m.get(8))
+print(m.get(2))
+print(m.get_or(2, "missing"))
+print(m.has(7))
+print(m.first_key())
+print(m.last_key())
+print(m.between(3, 8))
+print(m.remove(3))
+print(m.remove(100))
+print(m.size())
+print(m.keys())
+print(m.tree.check_props())
