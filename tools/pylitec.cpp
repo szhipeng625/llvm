@@ -16,9 +16,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 namespace {
 
@@ -107,7 +109,13 @@ int main(int argc, char **argv) {
     if (trace) {
       // 运行时只负责 fopen(\"w\"),目录要由驱动侧先建好;建失败也不致命,
       // 落盘会静默缺席,但 SSE 推送仍然可用。
-      if (std::system("mkdir -p /tmp/pylite_trace") != 0) {
+      //
+      // 不能用 std::system("mkdir -p ..."):Windows 上它经 cmd.exe 执行,
+      // cmd 的 mkdir 不认 -p,会在当前目录建一个名为 "-p" 的垃圾目录。
+      // create_directories 的路径解析与运行期 fopen 一致。
+      std::error_code ec;
+      std::filesystem::create_directories("/tmp/pylite_trace", ec);
+      if (ec) {
         std::fprintf(stderr, "警告: 无法创建 /tmp/pylite_trace,事件落盘不可用\n");
       }
     }

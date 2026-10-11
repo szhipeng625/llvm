@@ -8,7 +8,11 @@
 #include <iostream>
 #include <fstream>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>  // _mkdir
+#else
 #include <unistd.h>
+#endif
 #include <cstring>
 
 // ============================================================================
@@ -55,8 +59,13 @@ RaftNode::RaftNode(const RaftNodeConfig& config)
     , start_time_ms_(now_ms()) {
 
     // 确保数据目录存在
+    // Windows 的 mkdir 只有单参数形式(且需 <direct.h>),POSIX 是 (path, mode)。
     if (!config_.data_dir.empty()) {
+#ifdef _WIN32
+        _mkdir(config_.data_dir.c_str());
+#else
         mkdir(config_.data_dir.c_str(), 0755);
+#endif
     }
 
     // 初始化集群节点列表

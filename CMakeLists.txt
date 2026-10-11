@@ -36,12 +36,17 @@ add_compile_options(${LLVM_DEFINITIONS_LIST})
 # ---------------------------------------------------------------------------
 # 内置分布式项目 adviskv（作为子项目接入构建）
 # ---------------------------------------------------------------------------
-set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/adviskv/.adviskv_deps/vcpkg/installed" CACHE PATH "adviskv vcpkg installed dir")
-list(PREPEND CMAKE_PREFIX_PATH "${VCPKG_INSTALLED_DIR}/x64-linux")
-set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "Disable vcpkg manifest install" FORCE)
-add_subdirectory(third_party/adviskv)
+# 仅 Linux 构建接入:adviskv 是 Linux/vcpkg 项目,Windows 上子模块不可用,
+# 且没有任何 PyLite 源码引用它的符号。
+if(NOT WIN32)
+  set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/adviskv/.adviskv_deps/vcpkg/installed" CACHE PATH "adviskv vcpkg installed dir")
+  list(PREPEND CMAKE_PREFIX_PATH "${VCPKG_INSTALLED_DIR}/x64-linux")
+  set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "Disable vcpkg manifest install" FORCE)
+  add_subdirectory(third_party/adviskv)
+endif()
 
-add_library(pylite_runtime SHARED
+# 核心运行时:跨平台,两个平台都编。
+set(PYLITE_RUNTIME_SOURCES
   runtime/error.cpp
   runtime/gc.cpp
   runtime/arith.cpp
@@ -54,40 +59,65 @@ add_library(pylite_runtime SHARED
   runtime/io.cpp
   runtime/docker.cpp
   runtime/llm.cpp
-  runtime/cuda.cpp
   runtime/fusion.cpp
   runtime/inference.cpp
   runtime/tokenizer.cpp
-  runtime/server.cpp
   runtime/quantize.cpp
-  runtime/engine.cpp
   runtime/concurrency.cpp
   runtime/object.cpp
   runtime/trace.cpp
-  runtime/sandbox.cpp
-  runtime/cgroup.cpp
-  runtime/sandbox_api.cpp
-  runtime/distributed_adapter.cpp
-  runtime/cgroup_api.cpp
-  runtime/sysmon.cpp
-  runtime/sysmon_api.cpp
+  # raft 的三件是自足的:raft.cpp 不用 socket(选举是模拟的),raft_api.cpp 只依赖
+  # raft.h + py_str_new + py_trace_*。distributed_adapter.cpp 里 raft 那一段同理;
+  # 它自己的 cluster/kv 适配器段带 _WIN32 守卫(依赖被排除的那两个实现)。
+  # 真正必须留在 Linux 的是下游的 server.cpp 与 cluster_api/kv_admin_api.cpp。
   runtime/raft.cpp
   runtime/raft_api.cpp
-  runtime/cluster.cpp
-  runtime/cluster_api.cpp
-  runtime/kv_admin.cpp
-  runtime/kv_admin_api.cpp
+  runtime/distributed_adapter.cpp
 )
+
+# 仅 Linux:依赖 POSIX/seccomp/adviskv。
+#
+# 分两族:一族直接用了 Linux 专有头(seccomp.h / sys/socket.h / sys/wait.h /
+# sys/statvfs.h / dlfcn.h / 两参数 mkdir),另一族是它们的薄适配层 ——
+# 适配层自己语法干净,但符号定义在上面那些文件里,拆开就会链接失败,
+# 所以必须成组进出。
+if(NOT WIN32)
+  list(APPEND PYLITE_RUNTIME_SOURCES
+    runtime/cuda.cpp
+    runtime/server.cpp
+    runtime/engine.cpp
+    runtime/sandbox.cpp
+    runtime/sandbox_api.cpp
+    runtime/cgroup.cpp
+    runtime/cgroup_api.cpp
+    runtime/sysmon.cpp
+    runtime/sysmon_api.cpp
+    runtime/cluster.cpp
+    runtime/cluster_api.cpp
+    runtime/kv_admin.cpp
+    runtime/kv_admin_api.cpp
+  )
+endif()
+
+add_library(pylite_runtime SHARED ${PYLITE_RUNTIME_SOURCES})
 target_include_directories(pylite_runtime PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-# Linux 上 GCC 默认隐藏符号，需要显式设置默认可见性以匹配 MinGW 行为
-target_compile_options(pylite_runtime PRIVATE -fvisibility=default)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SECCOMP REQUIRED libseccomp)
-target_include_directories(pylite_runtime PRIVATE ${SECCOMP_INCLUDE_DIRS})
-find_package(OpenSSL REQUIRED)
-target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto adviskv_storage_lib adviskv_catalog_lib adviskv_topo_lib adviskv_sdk)
+if(WIN32)
+  # trace.cpp 的 _WIN32 分支用 winsock(socket/bind/listen/accept/recv/send/
+  # closesocket/gethostname)。trace.cpp 里的 #pragma comment(lib, "ws2_32.lib")
+  # 只对 MSVC 生效,MinGW 会直接忽略 —— 必须在这里显式链接,
+  # 否则与 trace 是否被调用无关,链接期就是一堆 undefined reference。
+  target_link_libraries(pylite_runtime PRIVATE ws2_32)
+else()
+  # Linux 上 GCC 默认隐藏符号，需要显式设置默认可见性以匹配 MinGW 行为
+  target_compile_options(pylite_runtime PRIVATE -fvisibility=default)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SECCOMP REQUIRED libseccomp)
+  target_include_directories(pylite_runtime PRIVATE ${SECCOMP_INCLUDE_DIRS})
+  find_package(OpenSSL REQUIRED)
+  target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto adviskv_storage_lib adviskv_catalog_lib adviskv_topo_lib adviskv_sdk)
+endif()
 
 # ---------------------------------------------------------------------------
 # 前端(词法 / 语法 / AST)—— 不依赖 LLVM
@@ -165,7 +195,9 @@ target_link_libraries(target_probe PRIVATE LLVM)
 # ---------------------------------------------------------------------------
 enable_testing()
 add_test(NAME abi_test COMMAND abi_test)
-add_test(NAME jit_spike COMMAND jit_spike)
+# 显式把运行时库的全路径传进去:JIT 要按名字加载它解析 py_* 符号,
+# 不传的话就得靠默认文件名猜(Windows 是 .dll、Linux 是 .so)。
+add_test(NAME jit_spike COMMAND jit_spike $<TARGET_FILE:pylite_runtime>)
 add_test(NAME frontend_test COMMAND frontend_test)
 add_test(NAME runtime_test COMMAND runtime_test)
 add_test(NAME gc_test COMMAND gc_test)

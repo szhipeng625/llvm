@@ -121,9 +121,19 @@ Value *Abi::loadFloat(IRBuilder<> &B, Value *slot) {
 // ---------------------------------------------------------------------------
 // 运行时函数声明
 //
-// 这些 declare* 是"聚合体按引用 + sret"这条约定的唯一落地点。
+// 这些 declare* 是"聚合体如何跨 ABI 边界"这条约定的唯一落地点,按平台分两种:
+//
+//   Win64 :聚合体(>8 字节)一律按引用传递,返回值走隐藏的 sret 指针。
+//          → void @name(ptr sret(%PyValue), ptr %a, ptr %b)
+//   SysV  :聚合体按值拆分到寄存器,返回值用 RAX:RDX。
+//          → %PyValue @name(%PyValue %a, %PyValue %b)
+//
+// 两侧都必须与 g++ 编译 runtime/*.cpp 时的实际降低一致。写错的表现是
+// "链接通过、lookup 成功、一执行就段错误",且几乎无法从崩溃点反推回来
+// (见 docs/llvm-notes.md 第 2 节)。
+//
 // 注意每个函数只声明一次并缓存 —— 重复创建同名函数会让 LLVM 把后来的
-// 改名成 py_add.1,而 DLL 里没有这个符号,症状又是"链接通过、一执行就段错误"。
+// 改名成 py_add.1,而 DLL 里没有这个符号,症状同上。
 // ---------------------------------------------------------------------------
 
 Function *Abi::getOrDeclare(StringRef name, FunctionType *ft, bool hasSret) {
@@ -149,26 +159,53 @@ Function *Abi::getOrDeclare(StringRef name, FunctionType *ft, bool hasSret) {
 }
 
 Function *Abi::declareBinRet(StringRef name) {
+#ifdef _WIN32
+  // void @name(ptr sret(%PyValue), ptr %a, ptr %b)
+  return getOrDeclare(name,
+                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, ptrTy_}, false),
+                      /*hasSret=*/true);
+#else
   // Linux System V ABI: %PyValue @name(%PyValue %a, %PyValue %b)
   // LLVM 自动将 {i32,i64} 拆分为寄存器对 (rdi,rsi) 和 (rdx,rcx)
   return getOrDeclare(name,
                       FunctionType::get(valueTy_, {valueTy_, valueTy_}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Function *Abi::declareUnaryRet(StringRef name) {
+#ifdef _WIN32
+  // void @name(ptr sret(%PyValue), ptr %a)
+  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_, ptrTy_}, false),
+                      /*hasSret=*/true);
+#else
   // Linux: %PyValue @name(%PyValue %a)
   return getOrDeclare(name, FunctionType::get(valueTy_, {valueTy_}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Function *Abi::declareUnaryPred(StringRef name) {
+#ifdef _WIN32
+  // i32 @name(ptr %a)  —— 谓词返回 i32 而非 i1,见 value.h
+  return getOrDeclare(name, FunctionType::get(i32Ty_, {ptrTy_}, false),
+                      /*hasSret=*/false);
+#else
   // i32 @name(%PyValue %a)  —— 谓词返回 i32 而非 i1,见 value.h
   return getOrDeclare(name, FunctionType::get(i32Ty_, {valueTy_}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Function *Abi::declareUnaryI64(StringRef name) {
+#ifdef _WIN32
+  // i64 @name(ptr %a)
+  //
+  // Win64 上按值聚合体一律降级成指针,于是 py_len(const PyValue*) 与
+  // py_to_int(PyValue) 的实参在机器层是同一个东西 —— 统一按指针声明即可。
+  return getOrDeclare(name, FunctionType::get(i64Ty_, {ptrTy_}, false),
+                      /*hasSret=*/false);
+#else
   // py_len 接收指针参数，py_to_int 按值接收 PyValue
   if (name == "py_len") {
     return getOrDeclare(name, FunctionType::get(i64Ty_, {ptrTy_}, false),
@@ -176,61 +213,105 @@ Function *Abi::declareUnaryI64(StringRef name) {
   }
   return getOrDeclare(name, FunctionType::get(i64Ty_, {valueTy_}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Function *Abi::declareNullaryRet(StringRef name) {
+#ifdef _WIN32
+  // void @name(ptr sret(%PyValue))
+  return getOrDeclare(name, FunctionType::get(voidTy_, {ptrTy_}, false),
+                      /*hasSret=*/true);
+#else
   // Linux: %PyValue @name()
   return getOrDeclare(name, FunctionType::get(valueTy_, {}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Function *Abi::declarePtrI64Ret(StringRef name) {
+#ifdef _WIN32
+  // void @name(ptr sret(%PyValue), ptr, i64)
+  return getOrDeclare(name,
+                      FunctionType::get(voidTy_, {ptrTy_, ptrTy_, i64Ty_}, false),
+                      /*hasSret=*/true);
+#else
   // Linux: %PyValue @name(ptr, i64)  —— ptr/i64 参数不受聚合体规则影响
   return getOrDeclare(name,
                       FunctionType::get(valueTy_, {ptrTy_, i64Ty_}, false),
                       /*hasSret=*/false);
+#endif
 }
 
 Value *Abi::callBinary(IRBuilder<> &B, StringRef fn, Value *a, Value *b) {
   Function *f = declareBinRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+#ifdef _WIN32
+  CallInst *call = B.CreateCall(f, {ret, a, b});
+  // 属性不会自动从声明传播到调用点,必须再标一次
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+#else
   // 从栈槽 load 出 PyValue 值，按值传递给运行时函数
   Value *va = B.CreateLoad(valueTy_, a);
   Value *vb = B.CreateLoad(valueTy_, b);
   Value *val = B.CreateCall(f, {va, vb}, (Twine(fn) + ".r").str());
   B.CreateStore(val, ret);
   return ret;
+#endif
 }
 
 Value *Abi::callUnary(IRBuilder<> &B, StringRef fn, Value *a) {
   Function *f = declareUnaryRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+#ifdef _WIN32
+  CallInst *call = B.CreateCall(f, {ret, a});
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+#else
   Value *va = B.CreateLoad(valueTy_, a);
   Value *val = B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
   B.CreateStore(val, ret);
   return ret;
+#endif
 }
 
 Value *Abi::callPredicate(IRBuilder<> &B, StringRef fn, Value *a) {
   Function *f = declareUnaryPred(fn);
+#ifdef _WIN32
+  // 实参已是栈槽指针,Win64 下直接传
+  return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
+#else
   Value *va = B.CreateLoad(valueTy_, a);
   return B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
+#endif
 }
 
 Value *Abi::callNullary(IRBuilder<> &B, StringRef fn) {
   Function *f = declareNullaryRet(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+#ifdef _WIN32
+  CallInst *call = B.CreateCall(f, {ret});
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+#else
   Value *val = B.CreateCall(f, {}, (Twine(fn) + ".r").str());
   B.CreateStore(val, ret);
   return ret;
+#endif
 }
 
 Value *Abi::callPtrI64(IRBuilder<> &B, StringRef fn, Value *p, Value *i) {
   Function *f = declarePtrI64Ret(fn);
   Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+#ifdef _WIN32
+  CallInst *call = B.CreateCall(f, {ret, p, i});
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+#else
   Value *val = B.CreateCall(f, {p, i}, (Twine(fn) + ".r").str());
   B.CreateStore(val, ret);
   return ret;
+#endif
 }
 
 void Abi::callPrint(IRBuilder<> &B, Value *slotArray, int64_t n) {
@@ -249,6 +330,26 @@ void Abi::callUnpack(IRBuilder<> &B, Value *tupleSlot, Value *outArray, int64_t 
 
 Value *Abi::callN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
                   ArrayRef<Value *> args) {
+#ifdef _WIN32
+  // Win64:返回值走隐藏的 sret 首参,调用完直接读该槽位。
+  SmallVector<Type *, 8> tys;
+  tys.reserve(paramTypes.size() + 1);
+  tys.push_back(ptrTy_);  // sret 槽位
+  tys.append(paramTypes.begin(), paramTypes.end());
+
+  Function *f = getOrDeclare(fn, FunctionType::get(voidTy_, tys, false),
+                             /*hasSret=*/true);
+
+  Value *ret = newSlot(B, (Twine(fn) + ".ret").str());
+  SmallVector<Value *, 8> callArgs;
+  callArgs.reserve(args.size() + 1);
+  callArgs.push_back(ret);
+  callArgs.append(args.begin(), args.end());
+
+  CallInst *call = B.CreateCall(f, callArgs);
+  call->addParamAttr(0, sretAttr_);
+  return ret;
+#else
   // callN 用于 py_slice/py_call_method 等接收指针参数的函数，
   // 参数已经是栈槽指针，直接传递即可
   Function *f = getOrDeclare(fn, FunctionType::get(valueTy_, paramTypes, false),
@@ -258,6 +359,7 @@ Value *Abi::callN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
   Value *val = B.CreateCall(f, args, (Twine(fn) + ".r").str());
   B.CreateStore(val, ret);
   return ret;
+#endif
 }
 
 void Abi::callVoidN(IRBuilder<> &B, StringRef fn, ArrayRef<Type *> paramTypes,
@@ -274,14 +376,19 @@ Value *Abi::truthyAsI1(IRBuilder<> &B, Value *slot) {
 }
 
 Value *Abi::callUnaryI64(IRBuilder<> &B, StringRef fn, Value *a) {
+  Function *f = declareUnaryI64(fn);
+#ifdef _WIN32
+  // Win64 下 py_len 与 py_to_int 的实参都是指针(按值聚合体降级成指针)
+  return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
+#else
   // py_to_int 按值接收 PyValue，py_len 按指针接收
   // 通过函数名区分：py_len 传指针，其余传值
-  Function *f = declareUnaryI64(fn);
   if (fn == "py_len") {
     return B.CreateCall(f, {a}, (Twine(fn) + ".r").str());
   }
   Value *va = B.CreateLoad(valueTy_, a);
   return B.CreateCall(f, {va}, (Twine(fn) + ".r").str());
+#endif
 }
 
 void Abi::emitRuntimeError(IRBuilder<> &B, const Twine &msg) {

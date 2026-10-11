@@ -76,6 +76,26 @@ PyValue py_raft_plugin_list_v(const PyValue* node_id) {
     return py_raft_plugin_list(strPtr(node_id), strLen(node_id));
 }
 
+// ====== 分布式便捷内建适配器(2026-10 增补) ======
+PyValue py_raft_leader_info_v(const PyValue* node_id) {
+    return py_raft_leader_info(strPtr(node_id), strLen(node_id));
+}
+PyValue py_raft_send_v(const PyValue* node_id, const PyValue* msg) {
+    return py_raft_send(strPtr(node_id), strLen(node_id),
+                        strPtr(msg), strLen(msg));
+}
+PyValue py_raft_recv_v(const PyValue* node_id) {
+    return py_raft_recv(strPtr(node_id), strLen(node_id));
+}
+
+}  // extern "C"
+
+#ifndef _WIN32
+// cluster / kv 的适配器依赖 cluster_api.cpp 与 kv_admin_api.cpp —— 那两个用了
+// POSIX 网络与 fork,只在 Linux 构建里。raft 那一段是自足的,两个平台都编。
+
+extern "C" {
+
 // ====== Cluster 适配器 ======
 
 PyValue py_cluster_connect_v(const PyValue* name, const PyValue* addr, const PyValue* secret) {
@@ -202,17 +222,6 @@ PyValue py_kv_unbind_sandbox_v(const PyValue* node_id) {
     return py_int(r);
 }
 
-// ====== 分布式便捷内建适配器(2026-10 增补) ======
-PyValue py_raft_leader_info_v(const PyValue* node_id) {
-    return py_raft_leader_info(strPtr(node_id), strLen(node_id));
-}
-PyValue py_raft_send_v(const PyValue* node_id, const PyValue* msg) {
-    return py_raft_send(strPtr(node_id), strLen(node_id),
-                        strPtr(msg), strLen(msg));
-}
-PyValue py_raft_recv_v(const PyValue* node_id) {
-    return py_raft_recv(strPtr(node_id), strLen(node_id));
-}
 // ====== add(box) 编排与容器内定位适配器(2026-10 增补) ======
 // box 是实例对象,直接透传指针,不走 strPtr 字符串提取
 PyValue py_kv_add_box_v(const PyValue* node_id, const PyValue* box, const PyValue* addr) {
@@ -242,4 +251,7 @@ PyValue py_kv_iter_destroy_v(const PyValue* it) {
 PyValue py_kv_iter_live_v() {
     return py_kv_iter_live();
 }
+
 }  // extern "C"
+
+#endif  // !_WIN32

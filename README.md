@@ -17,22 +17,42 @@ for i in range(1, a):
 需要 MSYS2 的 UCRT64 环境(不是 MSVCRT 的那个 MinGW):
 
 ```bash
+cd /d/pylite
+bash build-windows.sh              # 等价于 configure + 构建 + ctest,构建目录 build-win/
+```
+
+脚本会先把 PATH 修好再构建 —— 这一步不是可有可无的便利,见下。
+
+想手工敲命令的话:
+
+```bash
 # 在 D:\msys64\ucrt64.exe 打开的 shell 里
 cd /d/pylite
-cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -G Ninja -S . -B build-win -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DLLVM_DIR="$(llvm-config --cmakedir)"
-cmake --build build
-cd build && ctest --output-on-failure
+cmake --build build-win
+cd build-win && ctest --output-on-failure
 ```
 
 依赖:`mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,llvm,llvm-tools}`,LLVM 22.1.8。
 
-**不要在别的 shell 里构建。** 用自带的 MSVCRT 版 MinGW 与 UCRT64 的 LLVM 混用
-会导致链接失败甚至堆静默损坏。判断方式:`g++ --version` 必须显示 16.x 而非 13.x。
+**不要在别的 shell 里构建,也不要让 `/mingw64/bin` 抢在 `/d/msys64/ucrt64/bin` 前面。**
+如果 PATH 里 MSVCRT 版 MinGW 排在前面,UCRT64 的 `cc1plus.exe` 会加载 MSVCRT 的
+`libgcc_s_seh-1.dll`,于是**任何编译都静默失败** —— 退出码 1、没有任何错误输出,
+连 `int main(){}` 都编不出来。`g++ --version` 照样打印 16.x,因为那条路径不经过
+cc1plus,所以它不是有效的判断方式;要判断就直接编一个 hello world。
+
+同样的错配在**运行期**是另一种症状:`libstdc++-6.dll` 这类名字在两套工具链里
+都存在,加载到 MSVCRT 那份就是堆静默损坏(而不是报错)。所以修 PATH 要贯穿
+configure → 构建(要跑 pylitec.exe)→ ctest(要加载 libLLVM-22.dll)全程。
+
+**Linux 构建不受影响**:`CMakeLists.txt` 里平台差异都在 `if(WIN32)`/`else()` 分支内,
+`else()` 侧与原先一致;13 个 POSIX 专有模块(sandbox/cgroup/server/cluster 等)仅在
+Linux 下参与构建。raft 三件(raft/raft_api/distributed_adapter)是自足的,两个平台都编。
 
 ## 用法
 
-以下命令都在 **UCRT64 shell** 里、于仓库根目录执行(`build/bin/` 里已放着
+以下命令都在 **UCRT64 shell** 里、于仓库根目录执行(`build-win/bin/` 里已放着
 所有可执行文件)。
 
 ### 1. 先写一个 .pys
@@ -48,7 +68,7 @@ for x in xs:
 ### 2. 编译成目标文件,与 C++ 链接
 
 ```bash
-./build/bin/pylitec.exe hello.pys -o hello.o
+./build-win/bin/pylitec.exe hello.pys -o hello.o
 ```
 
 产出的是普通 COFF 目标文件。符号命名规则:
@@ -70,16 +90,16 @@ int main() {
 ```
 
 ```bash
-g++ -std=c++20 main.cpp hello.o -o hello.exe -L./build/bin -lpylite_runtime
+g++ -std=c++20 main.cpp hello.o -o hello.exe -L./build-win/bin -lpylite_runtime
 ./hello.exe
 # 1 1
 # 2 4
 # 3 9
 ```
 
-`-L./build/bin` 是为了让链接器找到导入库 `libpylite_runtime.dll.a`,
+`-L./build-win/bin` 是为了让链接器找到导入库 `libpylite_runtime.dll.a`,
 运行时则需要 `libpylite_runtime.dll` 在 `PATH` 上(它与 `pylitec.exe` 同在
-`build/bin/`,把那个目录加进 PATH 最省事)。
+`build-win/bin/`,把那个目录加进 PATH 最省事)。
 
 调用带参数的 PyLite 函数时,所有 `PyValue` 都**按指针**收发 ——
 这是 Win64 ABI 的硬性要求,详见下面的"两个务必先读的点"。返回值也走第一个
@@ -97,7 +117,7 @@ pylite_math_add(&r, &a, &b);     // r 里是 3
 
 ```bash
 g++ -std=c++20 main.cpp math.o -o math.exe \
-    -I./include -L./build/bin -lpylite_runtime
+    -I./include -L./build-win/bin -lpylite_runtime
 ```
 
 想直接看一个**完整的混合程序**(C++ 造数据 → PyLite 算 → C++ 收结果,
@@ -106,9 +126,9 @@ g++ -std=c++20 main.cpp math.o -o math.exe \
 ### 3. 查看中间产物
 
 ```bash
-./build/bin/pylitec.exe hello.pys -o hello.o --emit-ir hello.ll  # LLVM IR
-./build/bin/lex_dump.exe hello.pys                               # token 流
-./build/bin/ast_dump.exe hello.pys                               # 语法树
+./build-win/bin/pylitec.exe hello.pys -o hello.o --emit-ir hello.ll  # LLVM IR
+./build-win/bin/lex_dump.exe hello.pys                               # token 流
+./build-win/bin/ast_dump.exe hello.pys                               # 语法树
 ```
 
 排查代码生成问题时先看 `--emit-ir` 的输出。若结果在**开/关优化之间不一致**,
@@ -116,7 +136,7 @@ g++ -std=c++20 main.cpp math.o -o math.exe \
 而不是优化器算错:
 
 ```bash
-PYLITE_NO_OPT=1 ./build/bin/pylitec.exe hello.pys -o hello-noopt.o
+PYLITE_NO_OPT=1 ./build-win/bin/pylitec.exe hello.pys -o hello-noopt.o
 ```
 
 ### 4. 跑测试
@@ -140,7 +160,7 @@ cd build && ctest --output-on-failure
 
 | 现象 | 原因 |
 |---|---|
-| 启动时报缺少 `libpylite_runtime.dll` | 没在 UCRT64 shell 里跑,或没把 `build/bin` 加进 PATH |
+| 启动时报缺少 `libpylite_runtime.dll` | 没在 UCRT64 shell 里跑,或没把 `build-win/bin` 加进 PATH |
 | 链接报 `undefined reference to 'py_add'` | 忘了 `-lpylite_runtime` |
 | 编译成功、链接成功,一运行就段错误 | 几乎总是 ABI 边界问题 —— 见下节第 1 点 |
 | 中文输出在测试里比对失败 | 比对框架只支持 ASCII 输出,见 `tests/compare_output.cmake` |

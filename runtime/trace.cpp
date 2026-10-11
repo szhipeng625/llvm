@@ -301,6 +301,11 @@ extern "C" void py_trace_start(int port) {
   g_traceEnabled = true;
   g_serverRunning = true;
 #ifdef _WIN32
+  // Windows 上必须先初始化 winsock,否则下面线程里的 socket() 直接返回
+  // INVALID_SOCKET(WSANOTINITIALISED),SSE 服务静默失效 —— 不崩溃,但整个
+  // 服务等于不存在。gethostname 取机器标识同理。
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
   CreateThread(nullptr, 0, serverThread, nullptr, 0, nullptr);
 #else
   pthread_t t;

@@ -18,16 +18,16 @@
 
 ```bash
 # 1. 把 .pys 编成目标文件
-./build/bin/pylitec.exe examples/mixed/scores.pys -o examples/mixed/scores.o
+./build-win/bin/pylitec.exe examples/mixed/scores.pys -o examples/mixed/scores.o
 
 # 2. 编译并链接 C++ 宿主
 g++ -std=c++20 examples/mixed/main.cpp examples/mixed/scores.o \
-    -o examples/mixed/mixed.exe -I./include -L./build/bin -lpylite_runtime
+    -o examples/mixed/mixed.exe -I./include -L./build-win/bin -lpylite_runtime
 
 # 3. 把运行时 DLL 放到 exe 旁边
 #    ⚠️ 不做这一步的话,直接运行会**静默退出、没有任何输出** ——
 #    Windows 找不到 libpylite_runtime.dll,而它是运行时库,缺了连启动都过不去。
-cp ./build/bin/libpylite_runtime.dll examples/mixed/
+cp ./build-win/bin/libpylite_runtime.dll examples/mixed/
 
 # 4. 运行
 ./examples/mixed/mixed.exe
@@ -36,17 +36,17 @@ cp ./build/bin/libpylite_runtime.dll examples/mixed/
 产物(`scores.o`、`mixed.exe`、`libpylite_runtime.dll`)都落在 `examples/mixed/`
 下,和源码放一起。`*.o` / `*.exe` / `*.dll` 都在 .gitignore 里,不会误提交。
 
-> **为什么第 3 步不能省**:`g++` 链接时用 `-L./build/bin` 找到了导入库
+> **为什么第 3 步不能省**:`g++` 链接时用 `-L./build-win/bin` 找到了导入库
 > `libpylite_runtime.dll.a`(那只是链接期的符号表),但**运行时**需要的是
 > `libpylite_runtime.dll` 本身。Windows 只在 exe 所在目录和 PATH 里找 DLL,
 > 而 `examples/mixed/` 两者都没有 —— 于是进程在加载阶段就死了。
 >
 > 这也是为什么 CMake 那条路线没这个问题:CMake 把 exe 和 DLL 都放在
-> `build/bin/` 里。
+> `build-win/bin/` 里。
 
-`-I./include` 是为了 `#include "pylite/runtime.h"`,`-L./build/bin` 是为了找到
+`-I./include` 是为了 `#include "pylite/runtime.h"`,`-L./build-win/bin` 是为了找到
 导入库 `libpylite_runtime.dll.a`,运行期还需要 `libpylite_runtime.dll` 本身 ——
-把 `./build/bin` 加进 PATH 最省事。
+把 `./build-win/bin` 加进 PATH 最省事。
 
 ### 两条路线,同一个程序
 
@@ -56,7 +56,7 @@ cp ./build/bin/libpylite_runtime.dll examples/mixed/
 这个示例同时也接进了项目的 CMake,所以还有**自动路线**:
 
 ```bash
-cmake --build build && ./build/bin/mixed_demo.exe
+cmake --build build-win && ./build-win/bin/mixed_demo.exe
 ```
 
 两条路线编出来的是**同一个程序**(输出逐字节一致),只是产物名字和位置不同:
@@ -64,7 +64,7 @@ cmake --build build && ./build/bin/mixed_demo.exe
 | 路线 | 产物 | 适合 |
 |---|---|---|
 | 手工(上面三步) | `examples/mixed/mixed.exe` | 只想单独试这个例子,不碰项目其余部分 |
-| CMake 目标 | `build/bin/mixed_demo.exe` | 改完源码一条命令重建,也随 `ctest` 一起验证 |
+| CMake 目标 | `build-win/bin/mixed_demo.exe` | 改完源码一条命令重建,也随 `ctest` 一起验证 |
 
 ## 运行结果
 
@@ -224,7 +224,7 @@ static PyValue g_xs;          // 它指向的对象会被回收掉
 
 | 现象 | 原因 |
 |---|---|
-| 启动时报缺少 `libpylite_runtime.dll` | 没把 `./build/bin` 加进 PATH |
+| 启动时报缺少 `libpylite_runtime.dll` | 没把 `./build-win/bin` 加进 PATH |
 | `undefined reference to 'pylite_scores_clamp_all'` | 忘了把 `scores.o` 加进链接命令;或 `-I` 指定的模块名和符号对不上 |
 | 编译报找不到 `pylite/runtime.h` | 少了 `-I./include` |
 | 段错误,且发生在第一次调用时 | ABI 写错了 —— 检查是不是把 `PyValue` 按值声明了 |
