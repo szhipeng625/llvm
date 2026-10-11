@@ -96,6 +96,7 @@ if(NOT WIN32)
     runtime/cluster_api.cpp
     runtime/kv_admin.cpp
     runtime/kv_admin_api.cpp
+    runtime/plugin_api.cpp
   )
 endif()
 

@@ -131,6 +131,10 @@ void py_sandbox_set_stderr(const PyValue* inst, const char *path, int64_t pathLe
     }
 }
 
+// 返回值约定:
+//   >= 0   子进程真实退出码(0 表示成功)
+//   -1     配置缺失或 fork 失败
+//   -124   执行超过 cpu_limit_ms,子进程被终止(与 coreutils timeout 的 124 对齐,便于判题识别 TLE)
 int64_t py_sandbox_exec(const PyValue* inst) {
     int64_t handle = get_handle(inst);
     SandboxConfig config;
@@ -146,8 +150,33 @@ int64_t py_sandbox_exec(const PyValue* inst) {
     if (pid < 0) return -1;
     if (pid == 0) {
         sandbox_main(config);
+        _exit(127);
     }
-    return static_cast<int64_t>(pid);
+    // 等待子进程结束,带 CPU 时限看护:超时先 SIGKILL,避免判题端被死循环拖住
+    int64_t limit_ms = config.cpu_limit_ms > 0 ? config.cpu_limit_ms : 0;
+    int64_t waited_ms = 0;
+    const int64_t step_ms = 20;
+    int64_t budget_ms = limit_ms > 0 ? limit_ms + 1000 : 0;  // 无限制时无限等待
+    int status = 0;
+    while (true) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (WIFEXITED(status)) return WEXITSTATUS(status);
+            if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+            return -1;
+        }
+        if (r < 0) return -1;
+        if (budget_ms > 0 && waited_ms >= budget_ms) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return -124;
+        }
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = step_ms * 1000000L;
+        nanosleep(&ts, nullptr);
+        waited_ms += step_ms;
+    }
 }
 
 void py_sandbox_destroy(const PyValue* inst) {

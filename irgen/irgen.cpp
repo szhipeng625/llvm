@@ -491,6 +491,13 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "verify_precision") return "py_quantize_verify_precision";
     if (fn == "model_info") return "py_quantize_model_info";
   }
+  // Plugin 模块
+  if (mod == "plugin") {
+    if (fn == "scan") return "py_plugin_scan";
+    if (fn == "register") return "py_plugin_register";
+    if (fn == "call") return "py_plugin_call";
+    if (fn == "list") return "py_plugin_list";
+  }
   // Engine 模块
   if (mod == "engine") {
     if (fn == "init") return "py_engine_init";
