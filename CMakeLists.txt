@@ -20,7 +20,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # ---------------------------------------------------------------------------
 # Linux 上 LLVM 22 也是 shared 模式，LLVMConfig.cmake 导出 `LLVM` target
 # 指向 libLLVM-22.so。链接它就够了。
-find_package(LLVM REQUIRED CONFIG HINTS /usr/lib/llvm-22/lib/cmake/llvm)
+find_package(LLVM REQUIRED CONFIG HINTS /usr/lib/llvm-20/lib/cmake/llvm)
 message(STATUS "找到 LLVM ${LLVM_PACKAGE_VERSION} (${LLVM_DIR})")
 
 # LLVM_DEFINITIONS 是带空格的字符串,含 -D 前缀,要用 add_compile_options
