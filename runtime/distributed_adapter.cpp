@@ -14,6 +14,8 @@ static int64_t strLen(const PyValue* v) {
     if (v->tag != PY_STR) return 0;
     return py_str_size(v);
 }
+// 底层 kv 接口前置声明
+extern "C" PyValue py_kv_persist(const char*, int64_t);
 // ====== Raft 适配器 ======
 extern "C" {
 
@@ -202,6 +204,9 @@ PyValue py_kv_list_v() {
     return py_kv_list();
 }
 
+PyValue py_kv_persist_v(const PyValue* addr) {
+    return py_kv_persist(strPtr(addr), strLen(addr));
+}
 PyValue py_kv_alive_v(const PyValue* node_id) {
     int64_t r = py_kv_alive(strPtr(node_id), strLen(node_id));
     return py_int(r);

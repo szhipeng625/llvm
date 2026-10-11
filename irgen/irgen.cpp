@@ -567,6 +567,7 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "status") return "py_kv_status_v";
     if (fn == "list") return "py_kv_list_v";
     if (fn == "alive") return "py_kv_alive_v";
+    if (fn == "persist") return "py_kv_persist_v";
     if (fn == "bind_sandbox") return "py_kv_bind_sandbox_v";
     if (fn == "get_sandbox") return "py_kv_get_sandbox_v";
     if (fn == "unbind_sandbox") return "py_kv_unbind_sandbox_v";

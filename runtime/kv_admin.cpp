@@ -1,4 +1,5 @@
 #include "kv_admin.h"
+#include "lsm_client.h"
 #include <iostream>
 #include <chrono>
 #include <signal.h>
@@ -30,6 +31,74 @@ static const char* state_str(KvNodeState s) {
 KvAdmin& KvAdmin::instance() {
     static KvAdmin mgr;
     return mgr;
+}
+
+// ---- LSM 持久化实现 ----
+
+void KvAdmin::configure_persistence(const std::string& addr) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lsm_addr_ = addr;
+}
+
+void KvAdmin::persist_node(const KvNode& node) {
+    if (lsm_addr_.empty()) return;
+    size_t c = lsm_addr_.find(':');
+    std::string host = c == std::string::npos ? lsm_addr_ : lsm_addr_.substr(0, c);
+    int port = c == std::string::npos ? 6380 : std::atoi(lsm_addr_.substr(c + 1).c_str());
+    pylite_lsm::LsmClient cli(host, port, 2000);
+    if (!cli.ok()) return;
+    std::ostringstream json;
+    json << "{\"node_id\":\"" << node.node_id << "\",\"addr\":\"" << node.addr
+         << "\",\"binary\":\"" << node.binary << "\",\"work_dir\":\"" << node.work_dir
+         << "\",\"state\":\"" << state_str(node.state) << "\",\"pid\":" << node.pid
+         << ",\"restart_count\":" << node.restart_count << "}";
+    cli.set("pylite:kv:node:" + node.node_id, json.str());
+}
+
+void KvAdmin::persist_erase(const std::string& node_id) {
+    if (lsm_addr_.empty()) return;
+    size_t c = lsm_addr_.find(':');
+    std::string host = c == std::string::npos ? lsm_addr_ : lsm_addr_.substr(0, c);
+    int port = c == std::string::npos ? 6380 : std::atoi(lsm_addr_.substr(c + 1).c_str());
+    pylite_lsm::LsmClient cli(host, port, 2000);
+    if (!cli.ok()) return;
+    cli.del("pylite:kv:node:" + node_id);
+}
+
+void KvAdmin::restore_from_lsm() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (lsm_addr_.empty() || lsm_restored_) return;
+    lsm_restored_ = true;
+    size_t c = lsm_addr_.find(':');
+    std::string host = c == std::string::npos ? lsm_addr_ : lsm_addr_.substr(0, c);
+    int port = c == std::string::npos ? 6380 : std::atoi(lsm_addr_.substr(c + 1).c_str());
+    pylite_lsm::LsmClient cli(host, port, 3000);
+    if (!cli.ok()) return;
+    std::vector<std::string> keys;
+    if (!cli.keys("pylite:kv:node:*", keys)) return;
+    for (const auto& key : keys) {
+        std::string val;
+        if (!cli.get(key, val)) continue;
+        auto pick = [&](const char* k) -> std::string {
+            std::string pat = std::string("\"") + k + "\":\"";
+            size_t p = val.find(pat);
+            if (p == std::string::npos) return "";
+            p += pat.size();
+            size_t e = val.find('"', p);
+            return e == std::string::npos ? "" : val.substr(p, e - p);
+        };
+        KvNode node;
+        node.node_id = pick("node_id");
+        node.addr = pick("addr");
+        node.binary = pick("binary");
+        node.work_dir = pick("work_dir");
+        node.pid = -1;
+        node.restart_count = 0;
+        node.state = KvNodeState::STOPPED;
+        if (!node.node_id.empty() && nodes_.find(node.node_id) == nodes_.end()) {
+            nodes_[node.node_id] = node;
+        }
+    }
 }
 
 // ---- 内部方法 ----
@@ -147,6 +216,7 @@ bool KvAdmin::build(const std::string& node_id,
     node.started_at_ms = now_ms();
     node.last_active_ms = now_ms();
     nodes_[node_id] = node;
+    persist_node(node);  // 同步到 LSM,进程重启后可恢复
 
     std::cout << "[kv_admin] built node " << node_id << " pid=" << pid
               << " addr=" << addr << std::endl;
@@ -189,6 +259,7 @@ bool KvAdmin::erase(const std::string& node_id, std::string& error) {
     }
 
     nodes_.erase(it);
+    persist_erase(node_id);  // 从 LSM 同步删除
     std::cout << "[kv_admin] erased node " << node_id << std::endl;
     return true;
 }

@@ -84,6 +84,13 @@ public:
     // 检查节点进程是否存活
     bool is_alive(const std::string& node_id);
 
+    // ---- LSM 持久化 ----
+    // 配置 LSM 后端地址(如 hermes 的 6380)。配置后节点变更自动写入,
+    // 进程内首次使用时自动从 LSM 恢复注册表。addr 为空则关闭持久化。
+    void configure_persistence(const std::string& addr);
+    // 从 LSM 恢复注册表(进程启动或首次操作时调用,幂等)
+    void restore_from_lsm();
+
 private:
     KvAdmin() = default;
     ~KvAdmin() = default;
@@ -99,4 +106,12 @@ private:
 
     std::map<std::string, KvNode> nodes_;
     std::mutex mutex_;
+
+    // ---- LSM 持久化内部状态 ----
+    std::string lsm_addr_;            // LSM 后端地址(host:port),空表示未启用
+    bool lsm_restored_{false};        // 是否已从 LSM 恢复过(幂等控制)
+    // 将单个节点状态同步写入 LSM(需在已持有锁或变更点调用)
+    void persist_node(const KvNode& node);
+    // 从 LSM 删除节点记录
+    void persist_erase(const std::string& node_id);
 };

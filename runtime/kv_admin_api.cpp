@@ -199,6 +199,20 @@ int64_t py_kv_alive(const char *node_id, int64_t idLen) {
     return KvAdmin::instance().is_alive(id) ? 1 : 0;
 }
 
+// kv.persist(addr) → 配置 LSM 持久化后端(如 "43.157.39.171:6380")并恢复注册表
+// addr 为空串则关闭持久化。配置后节点变更自动写入 LSM,进程重启自动恢复。
+PyValue py_kv_persist(const char *addr, int64_t addrLen) {
+    std::string a(addr, addrLen);
+    KvAdmin::instance().configure_persistence(a);
+    if (!a.empty()) {
+        KvAdmin::instance().restore_from_lsm();
+    }
+    std::ostringstream json;
+    json << "{\"persistence\":\"" << (a.empty() ? "off" : a) << "\"}";
+    std::string s = json.str();
+    return py_str_new(s.c_str(), s.size());
+}
+
 // ====== 沙箱绑定与查找（映射表已在文件头 extern "C" 块内统一前置声明）======
 
 // kv.bind_sandbox(node_id, sandbox_handle) → 将沙箱绑定到节点
