@@ -116,7 +116,9 @@ else()
   pkg_check_modules(SECCOMP REQUIRED libseccomp)
   target_include_directories(pylite_runtime PRIVATE ${SECCOMP_INCLUDE_DIRS})
   find_package(OpenSSL REQUIRED)
-  target_link_libraries(pylite_runtime PRIVATE pthread dl ${SECCOMP_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto adviskv_storage_lib adviskv_catalog_lib adviskv_topo_lib adviskv_sdk)
+  # OpenSSL / seccomp 使用静态库内置，与 adviskv 内 gRPC 静态组保持一致，
+  # 避免同一符号同时从动态库和静态库加载两份副本。
+  target_link_libraries(pylite_runtime PRIVATE pthread dl /usr/lib/x86_64-linux-gnu/libseccomp.a /usr/lib/x86_64-linux-gnu/libssl.a /usr/lib/x86_64-linux-gnu/libcrypto.a adviskv_storage_lib adviskv_catalog_lib adviskv_topo_lib adviskv_sdk)
 endif()
 
 # ---------------------------------------------------------------------------

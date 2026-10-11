@@ -46,6 +46,13 @@ static PyValue op_result(const char* op, const std::string& node_id, bool ok, co
 
 extern "C" {
 
+// ====== 节点 ↔ 沙箱 双向映射（前置声明，供本文件所有函数使用）======
+// 正向:节点 ID -> 沙箱句柄（bind_sandbox / get_sandbox / unbind_sandbox）
+static std::map<std::string, int64_t> g_node_sandbox_map;
+static std::mutex g_node_sandbox_mutex;
+// 反向:沙箱句柄 -> 节点 ID（kv.locate(box) 由盒子反查所属节点）
+static std::map<int64_t, std::string> g_sandbox_node_map;
+
 // kv.build(node_id, binary, args_json, work_dir, addr) → 建立节点并启动
 PyValue py_kv_build(const char *node_id, int64_t idLen,
                     const char *binary, int64_t binLen,
@@ -104,10 +111,20 @@ PyValue py_kv_add(const char *node_id, int64_t idLen,
 }
 
 // kv.erase(node_id) → 永久移除节点
+// 销毁节点时同步清理双向映射:正向(node->handle)与反向(handle->node)一并清除,
+// 保证 erase 后 get_sandbox 返回 -1 且 locate(box) 不再找到该节点。
 PyValue py_kv_erase(const char *node_id, int64_t idLen) {
     std::string id(node_id, idLen);
     std::string error;
     bool ok = KvAdmin::instance().erase(id, error);
+    if (ok) {
+        std::lock_guard<std::mutex> lk(g_node_sandbox_mutex);
+        auto it = g_node_sandbox_map.find(id);
+        if (it != g_node_sandbox_map.end()) {
+            g_sandbox_node_map.erase(it->second);
+            g_node_sandbox_map.erase(it);
+        }
+    }
     return op_result("erase", id, ok, error);
 }
 
@@ -182,10 +199,7 @@ int64_t py_kv_alive(const char *node_id, int64_t idLen) {
     return KvAdmin::instance().is_alive(id) ? 1 : 0;
 }
 
-// ====== 沙箱绑定与查找 ======
-// 全局映射：节点 ID → 沙箱句柄
-static std::map<std::string, int64_t> g_node_sandbox_map;
-static std::mutex g_node_sandbox_mutex;
+// ====== 沙箱绑定与查找（映射表已在文件头 extern "C" 块内统一前置声明）======
 
 // kv.bind_sandbox(node_id, sandbox_handle) → 将沙箱绑定到节点
 int64_t py_kv_bind_sandbox(const char *node_id, int64_t idLen, int64_t handle) {
@@ -217,8 +231,7 @@ int64_t py_kv_unbind_sandbox(const char *node_id, int64_t idLen) {
 // ============================================================================
 // 分布式便捷内建:add(box) 统一编排与容器内定位(2026-10 增补)
 // ============================================================================
-// 反向映射:sandbox handle -> node_id,供 kv.locate(box) 由盒子反查所属节点
-static std::map<int64_t, std::string> g_sandbox_node_map;
+// 反向映射表已在文件头与正向表一起前置声明
 
 extern "C" {
 
