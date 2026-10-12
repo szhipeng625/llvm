@@ -131,6 +131,9 @@ int64_t KvAdmin::spawn_process(const KvNode& node, std::string& error) {
     }
 
     if (pid == 0) {
+        // 子进程独立成新会话和新进程组:脱离拉起方(一次性执行程序/终端会话)
+        // 的生命周期,避免拉起方退出时整个进程组被终止导致托管节点被杀。
+        setsid();
         // 注入节点身份:容器内代码经 PYLITE_NODE_ID 反查所属节点
         setenv("PYLITE_NODE_ID", node.node_id.c_str(), 1);
         setenv("PYLITE_NODE_ADDR", node.addr.c_str(), 1);
@@ -139,6 +142,13 @@ int64_t KvAdmin::spawn_process(const KvNode& node, std::string& error) {
             _exit(126);
         }
 
+        // 标准输入重定向到 /dev/null:防止服务因子进程无输入源而异常退出
+        // (如 orchestrator 从 stdin 读任务,无 stdin 时会立即退出)
+        int nullfd = open("/dev/null", O_RDONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDIN_FILENO);
+            close(nullfd);
+        }
         // 重定向 stdout/stderr 到日志文件（node_id.log）
         std::string log_path = (node.work_dir.empty() ? "/tmp" : node.work_dir)
                                + "/" + node.node_id + ".log";
