@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <cstdlib>
+#include "kv_args_helper.h"
 
 // 辅助：节点转 JSON
 static std::string node_to_json(const KvNode& n) {
@@ -65,17 +66,8 @@ PyValue py_kv_build(const char *node_id, int64_t idLen,
     std::string dir(work_dir, dirLen);
     std::string a(addr, addrLen);
 
-    // 解析参数 JSON 数组: ["arg1", "arg2"]
-    std::vector<std::string> args;
-    size_t start = 0;
-    while (start < args_str.size()) {
-        size_t q1 = args_str.find('"', start);
-        if (q1 == std::string::npos) break;
-        size_t q2 = args_str.find('"', q1 + 1);
-        if (q2 == std::string::npos) break;
-        args.push_back(args_str.substr(q1 + 1, q2 - q1 - 1));
-        start = q2 + 1;
-    }
+    // 解析参数数组：兼容 JSON(["a","b"]/[300]) 与硬编码裸写法([/path/to.py])
+    std::vector<std::string> args = pylite::parse_kv_args(args_str);
 
     std::string error;
     bool ok = KvAdmin::instance().build(id, bin, args, dir, a, error);
@@ -94,16 +86,7 @@ PyValue py_kv_add(const char *node_id, int64_t idLen,
     std::string dir(work_dir, dirLen);
     std::string a(addr, addrLen);
 
-    std::vector<std::string> args;
-    size_t start = 0;
-    while (start < args_str.size()) {
-        size_t q1 = args_str.find('"', start);
-        if (q1 == std::string::npos) break;
-        size_t q2 = args_str.find('"', q1 + 1);
-        if (q2 == std::string::npos) break;
-        args.push_back(args_str.substr(q1 + 1, q2 - q1 - 1));
-        start = q2 + 1;
-    }
+    std::vector<std::string> args = pylite::parse_kv_args(args_str);
 
     std::string error;
     bool ok = KvAdmin::instance().add(id, bin, args, dir, a, error);
