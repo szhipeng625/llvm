@@ -256,6 +256,65 @@ PyValue py_kv_iter_destroy_v(const PyValue* it) {
 PyValue py_kv_iter_live_v() {
     return py_kv_iter_live();
 }
+// ====== 节点内置 MQ 队列适配器(2026-10 增补) ======
+// 底层队列接口前置声明(kv_queue_api.cpp)
+PyValue py_kv_enqueue(const char*, int64_t, const char*, int64_t);
+PyValue py_kv_dequeue(const char*, int64_t, const char*, int64_t);
+PyValue py_kv_done(const char*, int64_t);
+PyValue py_kv_qlen(const char*, int64_t);
+PyValue py_kv_set_quota(const char*, int64_t, const char*, int64_t);
+PyValue py_kv_quota(const char*, int64_t);
+
+PyValue py_kv_enqueue_v(const PyValue* queue, const PyValue* payload) {
+    return py_kv_enqueue(strPtr(queue), strLen(queue),
+                         strPtr(payload), strLen(payload));
+}
+PyValue py_kv_dequeue_v(const PyValue* node_id, const PyValue* queue) {
+    return py_kv_dequeue(strPtr(node_id), strLen(node_id),
+                         strPtr(queue), strLen(queue));
+}
+PyValue py_kv_done_v(const PyValue* node_id) {
+    return py_kv_done(strPtr(node_id), strLen(node_id));
+}
+PyValue py_kv_qlen_v(const PyValue* queue) {
+    return py_kv_qlen(strPtr(queue), strLen(queue));
+}
+PyValue py_kv_set_quota_v(const PyValue* node_id, const PyValue* quota) {
+    return py_kv_set_quota(strPtr(node_id), strLen(node_id),
+                           strPtr(quota), strLen(quota));
+}
+PyValue py_kv_quota_v(const PyValue* node_id) {
+    return py_kv_quota(strPtr(node_id), strLen(node_id));
+}
+// ====== 通用 KV 读写与本地文件写入适配器(2026-10 增补) ======
+PyValue py_kv_kset(const char*, int64_t, const char*, int64_t);
+PyValue py_kv_kget(const char*, int64_t);
+PyValue py_file_write(const char*, int64_t, const char*, int64_t);
+PyValue py_file_read(const char*, int64_t);
+int64_t py_str_to_int(const char*, int64_t);
+PyValue py_int_to_str(int64_t);
+
+PyValue py_kv_kset_v(const PyValue* key, const PyValue* value) {
+    return py_kv_kset(strPtr(key), strLen(key),
+                      strPtr(value), strLen(value));
+}
+PyValue py_kv_kget_v(const PyValue* key) {
+    return py_kv_kget(strPtr(key), strLen(key));
+}
+PyValue py_file_write_v(const PyValue* path, const PyValue* content) {
+    return py_file_write(strPtr(path), strLen(path),
+                         strPtr(content), strLen(content));
+}
+PyValue py_file_read_v(const PyValue* path) {
+    return py_file_read(strPtr(path), strLen(path));
+}
+PyValue py_str_to_int_v(const PyValue* s) {
+    return py_int(py_str_to_int(strPtr(s), strLen(s)));
+}
+PyValue py_int_to_str_v(const PyValue* v) {
+    int64_t n = (v && v->tag == PY_INT) ? v->as.i : 0;
+    return py_int_to_str(n);
+}
 
 }  // extern "C"
 

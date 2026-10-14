@@ -16,6 +16,12 @@ public:
     bool get(const std::string& key, std::string& val);
     bool del(const std::string& key);
     bool keys(const std::string& pattern, std::vector<std::string>& out);
+    // ---- 队列原语(节点内置 MQ 扩展,2026-10) ----
+    long long lpush(const std::string& key, const std::string& val);   // 入队,返回队列长度,-1 失败
+    bool rpop(const std::string& key, std::string& val);               // 出队(FIFO),空队列返回 false
+    long long llen(const std::string& key);                            // 队列长度,-1 失败
+    long long incr(const std::string& key);                            // 原子自增,返回新值,-1 失败
+    long long decr(const std::string& key);                            // 原子自减,返回新值,-1 失败
 private:
     int fd_{-1};
     int timeout_ms_;

@@ -7,6 +7,7 @@ struct SandboxConfig {
     uint32_t cpu_limit_ms;       // CPU 时间限制（毫秒）
     uint64_t mem_limit_bytes;    // 内存限制（字节）
     int64_t  max_pids;           // 最大进程数（防进程炸弹）
+    bool     no_seccomp = false; // 关闭系统调用过滤(编译等可信阶段使用,2026-10 增补)
     std::string work_dir;        // 工作目录（chdir 目标）
     std::string user_binary;     // 用户可执行文件绝对路径
     std::vector<std::string> args; // 传递给用户程序的 argv

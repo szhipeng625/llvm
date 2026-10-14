@@ -117,9 +117,12 @@ static int install_seccomp() {
     }
 
     // 5. 安装 seccomp 过滤器（不可逆，必须在 exec 前最后一步）
-    if (install_seccomp() != 0) {
-        fprintf(stderr, "[sandbox] seccomp load failed\n");
-        _exit(126);
+    //    no_seccomp 为 true 时跳过(编译等可信阶段,避免 g++ 多级子进程被误杀)
+    if (!config.no_seccomp) {
+        if (install_seccomp() != 0) {
+            fprintf(stderr, "[sandbox] seccomp load failed\n");
+            _exit(126);
+        }
     }
 
     // 6. 构建 argv 并 exec 用户程序

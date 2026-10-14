@@ -96,6 +96,7 @@ if(NOT WIN32)
     runtime/cluster_api.cpp
     runtime/kv_admin.cpp
     runtime/kv_admin_api.cpp
+    runtime/kv_queue_api.cpp
     runtime/plugin_api.cpp
     runtime/lsm_client.cpp
   )

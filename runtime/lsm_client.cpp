@@ -79,6 +79,50 @@ bool LsmClient::del(const std::string& key) {
     return cmd({"DEL", key}, r);
 }
 
+// ---- 队列原语实现 ----
+// 解析 RESP 整数回复(":123\r\n"),失败返回 -1
+static long long parse_int_reply(const std::string& r) {
+    if (r.empty() || r[0] != ':') return -1;
+    return std::atoll(r.c_str() + 1);
+}
+
+long long LsmClient::lpush(const std::string& key, const std::string& val) {
+    std::string r;
+    if (!cmd({"LPUSH", key, val}, r)) return -1;
+    return parse_int_reply(r);
+}
+
+bool LsmClient::rpop(const std::string& key, std::string& val) {
+    std::string r;
+    if (!cmd({"RPOP", key}, r)) return false;
+    if (r.rfind("$-1", 0) == 0) return false;   // 空队列
+    size_t p = r.find("\r\n");
+    if (p == std::string::npos) return false;
+    size_t s = p + 2;
+    size_t e = r.find("\r\n", s);
+    if (e == std::string::npos) e = r.size();
+    val = r.substr(s, e - s);
+    return true;
+}
+
+long long LsmClient::llen(const std::string& key) {
+    std::string r;
+    if (!cmd({"LLEN", key}, r)) return -1;
+    return parse_int_reply(r);
+}
+
+long long LsmClient::incr(const std::string& key) {
+    std::string r;
+    if (!cmd({"INCR", key}, r)) return -1;
+    return parse_int_reply(r);
+}
+
+long long LsmClient::decr(const std::string& key) {
+    std::string r;
+    if (!cmd({"DECR", key}, r)) return -1;
+    return parse_int_reply(r);
+}
+
 bool LsmClient::keys(const std::string& pattern, std::vector<std::string>& out) {
     std::string r;
     if (!cmd({"KEYS", pattern}, r)) return false;

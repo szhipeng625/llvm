@@ -513,6 +513,7 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "set_cpu_limit") return "py_sandbox_set_cpu_limit_v";
     if (fn == "set_mem_limit") return "py_sandbox_set_mem_limit_v";
     if (fn == "set_max_pids") return "py_sandbox_set_max_pids_v";
+    if (fn == "set_no_seccomp") return "py_sandbox_set_no_seccomp_v";
     if (fn == "set_work_dir") return "py_sandbox_set_work_dir_v";
     if (fn == "set_binary") return "py_sandbox_set_binary_v";
     if (fn == "add_arg") return "py_sandbox_add_arg_v";
@@ -579,6 +580,25 @@ static const char *builtinModulePrefix(const std::string &mod, const std::string
     if (fn == "rewind") return "py_kv_iter_rewind_v";
     if (fn == "iter_destroy") return "py_kv_iter_destroy_v";
     if (fn == "iter_live") return "py_kv_iter_live_v";
+    // 节点内置 MQ 队列方法(2026-10 增补)
+    if (fn == "enqueue") return "py_kv_enqueue_v";
+    if (fn == "dequeue") return "py_kv_dequeue_v";
+    if (fn == "done") return "py_kv_done_v";
+    if (fn == "qlen") return "py_kv_qlen_v";
+    if (fn == "set_quota") return "py_kv_set_quota_v";
+    if (fn == "quota") return "py_kv_quota_v";
+    if (fn == "kset") return "py_kv_kset_v";
+    if (fn == "kget") return "py_kv_kget_v";
+  }
+  // 本地文件操作模块（节点落盘代码供编译,2026-10 增补）
+  if (mod == "fio") {
+    if (fn == "write") return "py_file_write_v";
+    if (fn == "read") return "py_file_read_v";
+  }
+  // 字符串转换模块（任务参数解析,2026-10 增补）
+  if (mod == "strc") {
+    if (fn == "to_int") return "py_str_to_int_v";
+    if (fn == "to_str") return "py_int_to_str_v";
   }
   return nullptr;
 }

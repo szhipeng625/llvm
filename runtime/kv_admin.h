@@ -90,6 +90,8 @@ public:
     void configure_persistence(const std::string& addr);
     // 从 LSM 恢复注册表(进程启动或首次操作时调用,幂等)
     void restore_from_lsm();
+    // 读取当前持久化地址(节点内置 MQ 用于定位队列存储,2026-10 增补)
+    std::string persistence_addr() const { return lsm_addr_; }
 
 private:
     KvAdmin() = default;

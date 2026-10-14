@@ -68,6 +68,16 @@ void py_sandbox_set_max_pids(const PyValue* inst, int64_t max_pids) {
     }
 }
 
+// 关闭系统调用过滤(编译等可信阶段使用,2026-10 增补)
+void py_sandbox_set_no_seccomp(const PyValue* inst, int64_t flag) {
+    int64_t handle = get_handle(inst);
+    std::lock_guard<std::mutex> lk(g_sandbox_mutex);
+    auto it = g_sandbox_configs.find(handle);
+    if (it != g_sandbox_configs.end()) {
+        it->second.no_seccomp = (flag != 0);
+    }
+}
+
 void py_sandbox_set_work_dir(const PyValue* inst, const char *path, int64_t pathLen) {
     int64_t handle = get_handle(inst);
     std::lock_guard<std::mutex> lk(g_sandbox_mutex);
@@ -244,6 +254,10 @@ PyValue py_sandbox_set_mem_limit_v(const PyValue* inst, const PyValue* bytes) {
 }
 PyValue py_sandbox_set_max_pids_v(const PyValue* inst, const PyValue* n) {
     py_sandbox_set_max_pids(inst, sb_int(n));
+    return py_none();
+}
+PyValue py_sandbox_set_no_seccomp_v(const PyValue* inst, const PyValue* flag) {
+    py_sandbox_set_no_seccomp(inst, sb_int(flag));
     return py_none();
 }
 PyValue py_sandbox_exec_v(const PyValue* inst) {
