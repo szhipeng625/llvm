@@ -1,0 +1,216 @@
+# mount_protocol.pys — PyLite 通用挂载协议库(平铺版, 兼容双版本)
+# 场景: 挂载 MySQL、CloudJudge、OJ、Docker 等不同后端时操作各不相同,
+#       本库定义统一协议接口, .pys 脚本只面向标准操作编程,
+#       由协议层把标准操作分发到对应后端的适配实现.
+# 用法: pylitec 为单文件编译, 使用时拼接后再编译:
+#       cat mount_protocol.pys your_main.pys > app.pys
+#       pylitec app.pys -o app.o -I app
+
+# ---------- 1. 标准操作码(协议层唯一约定) ----------
+MP_READ = "READ"
+MP_WRITE = "WRITE"
+MP_EXEC = "EXEC"
+MP_LIST = "LIST"
+MP_STATUS = "STATUS"
+
+# ---------- 2. 统一响应构造 ----------
+def mp_ok(data):
+    return {"ok": 1, "data": data, "error": ""}
+
+def mp_err(msg):
+    return {"ok": 0, "data": "", "error": msg}
+
+# ============================================================
+#  MySQL 后端适配
+#  桥接函数 mp_mysql_bridge 是唯一后端通道, 生产环境替换为真实 MySQL 连接
+# ============================================================
+def mp_mysql_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "WRITE":
+        return "write ok, rows=1, sql=" + arg
+    else:
+        if op == "READ":
+            return "query result: demo_data"
+        else:
+            if op == "EXEC":
+                return "sql executed: " + arg
+            else:
+                if op == "LIST":
+                    return "tables: users, sessions, submissions, problems, contests, contest_registrations, generators, problem_generators"
+                else:
+                    return "mysql alive, dsn=" + cfg.get("dsn", "mysql://127.0.0.1:3306/oj")
+
+def mp_mysql_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_mysql_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_mysql_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_mysql_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_mysql_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_mysql_bridge(h, op, arg))
+                    else:
+                        return mp_err("mysql: unsupported op " + op)
+
+# ============================================================
+#  OJ 判题后端适配
+#  桥接函数 mp_oj_bridge 是唯一后端通道, 生产环境替换为对接 OJ 判题队列
+# ============================================================
+def mp_oj_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "WRITE":
+        return "submitted, problem=" + cfg.get("problem", "?")
+    else:
+        if op == "EXEC":
+            return "judging, problem=" + cfg.get("problem", "?")
+        else:
+            if op == "READ":
+                return "verdict: AC, time=15ms, mem=4MB"
+            else:
+                if op == "LIST":
+                    return "problems: A+B, sort, dp, graph, string"
+                else:
+                    return "oj alive, node=" + cfg.get("node", "?") + ", queue=" + cfg.get("queue", "judge")
+
+def mp_oj_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_oj_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_oj_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_oj_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_oj_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_oj_bridge(h, op, arg))
+                    else:
+                        return mp_err("oj: unsupported op " + op)
+
+# ============================================================
+#  Docker 后端适配
+#  桥接函数 mp_docker_bridge 是唯一后端通道, 生产环境替换为 Docker API 或 docker 模块
+# ============================================================
+def mp_docker_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "EXEC":
+        return "executed: " + arg
+    else:
+        if op == "READ":
+            return "logs from " + cfg.get("container", "?")
+        else:
+            if op == "WRITE":
+                return "config updated: " + arg
+            else:
+                if op == "LIST":
+                    return "containers: vh-infinity, vh-mysql, vh-redis, vh-backend"
+                else:
+                    return "docker alive, compose=" + cfg.get("compose", "docker-compose.yml")
+
+def mp_docker_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_docker_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_docker_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_docker_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_docker_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_docker_bridge(h, op, arg))
+                    else:
+                        return mp_err("docker: unsupported op " + op)
+
+# ============================================================
+#  CloudJudge 后端适配
+#  桥接函数 mp_judge_bridge 是唯一后端通道, 生产环境替换为 kv 队列实现
+# ============================================================
+def mp_judge_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "WRITE":
+        return "submitted, queue=" + cfg.get("queue", "judge")
+    else:
+        if op == "EXEC":
+            return "submitted, queue=" + cfg.get("queue", "judge")
+        else:
+            if op == "READ":
+                return "last submission: int main(){return 0;}"
+            else:
+                if op == "LIST":
+                    return "queue=" + cfg.get("queue", "judge") + ", node=" + cfg.get("node", "?")
+                else:
+                    return "judge alive, node=" + cfg.get("node", "?")
+
+def mp_judge_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_judge_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_judge_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_judge_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_judge_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_judge_bridge(h, op, arg))
+                    else:
+                        return mp_err("cloud_judge: unsupported op " + op)
+
+# ---------- 5. 挂载与卸载(注册表通过参数传入) ----------
+def mp_mount(mounts, name, backend, config):
+    h = {"name": name, "backend": backend, "config": config, "state": "mounted"}
+    mounts[name] = h
+    return mp_ok("mounted " + name + " (" + backend + ")")
+
+def mp_unmount(mounts, name):
+    h = mounts.get(name, {})
+    if h.get("name", "") == "":
+        return mp_err("not mounted: " + name)
+    else:
+        mounts.pop(name)
+        return mp_ok("unmounted " + name)
+
+def mp_list_mounts(mounts):
+    names = ""
+    for k in mounts:
+        if names == "":
+            names = k
+        else:
+            names = names + ", " + k
+    return mp_ok(names)
+
+# ---------- 6. 统一分发器(脚本层唯一入口) ----------
+def mp_call(mounts, name, op, arg):
+    h = mounts.get(name, {})
+    if h.get("name", "") == "":
+        return mp_err("not mounted: " + name)
+    b = h.get("backend", "")
+    if b == "mysql":
+        return mp_mysql_op(h, op, arg)
+    else:
+        if b == "oj":
+            return mp_oj_op(h, op, arg)
+        else:
+            if b == "docker":
+                return mp_docker_op(h, op, arg)
+            else:
+                if b == "cloud_judge":
+                    return mp_judge_op(h, op, arg)
+                else:
+                    return mp_err("unknown backend: " + b)

@@ -1,0 +1,45 @@
+# mount_demo.pys — 通用挂载协议演示(全后端版)
+# 演示: 同一套标准操作接口, 驱动 MySQL / OJ / Docker / CloudJudge 四种后端
+# 使用: cat mount_protocol.pys mount_demo.pys > app.pys && pylitec app.pys -o app.o -I app
+
+mounts = {}
+
+print("== 1. 挂载全部后端 ==")
+r1 = mp_mount(mounts, "db1", "mysql", {"dsn": "mysql://127.0.0.1:3306/oj"})
+print(r1.get("data", r1.get("error", "")))
+r2 = mp_mount(mounts, "oj1", "oj", {"node": "node-hermes", "queue": "judge", "problem": "A+B", "work_dir": "/tmp"})
+print(r2.get("data", r2.get("error", "")))
+r3 = mp_mount(mounts, "dk1", "docker", {"compose": "docker-compose.yml", "container": "vh-backend"})
+print(r3.get("data", r3.get("error", "")))
+r4 = mp_mount(mounts, "judge1", "cloud_judge", {"queue": "judge", "node": "node-txy2", "work_dir": "/tmp"})
+print(r4.get("data", r4.get("error", "")))
+
+print("== 2. 挂载清单 ==")
+print(mp_list_mounts(mounts).get("data", ""))
+
+print("== 3. MySQL 操作 ==")
+print(mp_call(mounts, "db1", MP_WRITE, "INSERT INTO users VALUES(1, ...)").get("data", ""))
+print(mp_call(mounts, "db1", MP_READ, "").get("data", ""))
+print(mp_call(mounts, "db1", MP_LIST, "").get("data", ""))
+print(mp_call(mounts, "db1", MP_STATUS, "").get("data", ""))
+
+print("== 4. OJ 判题操作 ==")
+print(mp_call(mounts, "oj1", MP_EXEC, "int main(){int a,b;cin>>a>>b;cout<<a+b;}").get("data", ""))
+print(mp_call(mounts, "oj1", MP_LIST, "").get("data", ""))
+print(mp_call(mounts, "oj1", MP_STATUS, "").get("data", ""))
+
+print("== 5. Docker 操作 ==")
+print(mp_call(mounts, "dk1", MP_LIST, "").get("data", ""))
+print(mp_call(mounts, "dk1", MP_EXEC, "docker restart vh-backend").get("data", ""))
+print(mp_call(mounts, "dk1", MP_STATUS, "").get("data", ""))
+
+print("== 6. CloudJudge 操作 ==")
+print(mp_call(mounts, "judge1", MP_EXEC, "int main(){return 0;}").get("data", ""))
+print(mp_call(mounts, "judge1", MP_STATUS, "").get("data", ""))
+
+print("== 7. 错误路径 ==")
+print(mp_call(mounts, "ghost", MP_READ, "").get("error", ""))
+
+print("== 8. 卸载 ==")
+print(mp_unmount(mounts, "db1").get("data", ""))
+print("remain: " + mp_list_mounts(mounts).get("data", ""))

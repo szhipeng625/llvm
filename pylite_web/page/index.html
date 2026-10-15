@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyLite 在线编译器</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;flex-direction:column}
+header{background:#161b22;border-bottom:1px solid #30363d;padding:14px 28px;display:flex;align-items:center;gap:14px}
+header h1{font-size:20px;background:linear-gradient(135deg,#58a6ff,#3fb950);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+header .sub{font-size:12px;color:#8b949e}
+.toolbar{background:#161b22;padding:10px 28px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #30363d;flex-wrap:wrap}
+select,button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer}
+select:hover,button:hover{border-color:#58a6ff}
+button.run{background:#238636;border-color:#2ea043;font-weight:600}
+button.run:hover{background:#2ea043}
+button.run:disabled{background:#21262d;color:#8b949e;cursor:wait}
+button.doc{background:#1f6feb;border-color:#388bfd}
+button.doc:hover{background:#388bfd}
+#status{font-size:13px;color:#8b949e;margin-left:auto}
+.main{flex:1;display:flex;gap:0;min-height:0}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
+.pane .label{padding:6px 28px;font-size:12px;color:#8b949e;background:#0d1117;border-bottom:1px solid #21262d}
+.editor-wrap{flex:1;position:relative;min-height:0}
+#editor{position:absolute;inset:0;background:#0d1117;color:#e6edf3;border:none;outline:none;resize:none;padding:14px 28px;font-family:"SF Mono",Consolas,"Courier New",monospace;font-size:14px;line-height:1.6;tab-size:4;white-space:pre;overflow:auto}
+#suggest{position:absolute;z-index:50;background:#161b22;border:1px solid #30363d;border-radius:6px;min-width:220px;max-width:340px;max-height:240px;overflow:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);font-size:13px}
+#suggest .item{padding:6px 12px;cursor:pointer;display:flex;gap:8px;align-items:baseline}
+#suggest .item:hover,#suggest .item.sel{background:#1f6feb}
+#suggest .item .kind{color:#8b949e;font-size:11px;margin-left:auto}
+#suggest .item .sig{color:#a5d6ff;font-size:11px}
+#output{flex:1;background:#010409;color:#7ee787;padding:14px 28px;font-family:"SF Mono",Consolas,monospace;font-size:13px;line-height:1.6;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.divider{width:1px;background:#21262d}
+footer{padding:8px 28px;font-size:12px;color:#6e7681;background:#161b22;border-top:1px solid #30363d;text-align:center}
+#docPanel{position:fixed;top:0;right:-560px;width:540px;height:100vh;background:#0d1117;border-left:1px solid #30363d;transition:right .25s ease;z-index:100;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.5)}
+#docPanel.open{right:0}
+#docPanel .doc-head{padding:14px 20px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;justify-content:space-between}
+#docPanel .doc-head h2{font-size:16px;color:#58a6ff}
+#docPanel .doc-close{background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e6edf3;padding:4px 12px;cursor:pointer;font-size:13px}
+#docPanel .doc-body{flex:1;overflow:auto;padding:16px 20px}
+.doc-mod{margin-bottom:22px}
+.doc-mod h3{font-size:14px;color:#3fb950;border-bottom:1px solid #21262d;padding-bottom:5px;margin-bottom:8px}
+.doc-mod .desc{font-size:12px;color:#8b949e;margin-bottom:8px}
+.doc-fn{font-family:"SF Mono",Consolas,monospace;font-size:12.5px;color:#a5d6ff;padding:3px 0 3px 12px;line-height:1.5}
+.doc-fn .fndesc{color:#8b949e;font-family:inherit}
+.doc-sec{margin-bottom:22px}
+.doc-sec h3{font-size:14px;color:#d29922;border-bottom:1px solid #21262d;padding-bottom:5px;margin-bottom:8px}
+.doc-note{font-size:12px;color:#6e7681;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin-bottom:16px;line-height:1.6}
+</style>
+</head>
+<body>
+<header>
+<h1>PyLite 在线编译器</h1>
+<span class="sub">基于 LLVM 的 Python 系语言编译器 · 支持代码补全与内置函数速查</span>
+</header>
+<div class="toolbar">
+<label style="font-size:13px;color:#8b949e">示例代码：</label>
+<select id="examples"></select>
+<button class="run" id="runBtn">&#9654; 运行</button>
+<button id="clearBtn">清空输出</button>
+<button class="doc" id="docBtn">内置函数</button>
+<span id="status">就绪</span>
+</div>
+<div class="main">
+<div class="pane">
+<div class="label">代码编辑（输入时自动补全：关键字 / 内置函数 / 模块成员；Tab 缩进）</div>
+<div class="editor-wrap">
+<textarea id="editor" spellcheck="false"></textarea>
+<div id="suggest"></div>
+</div>
+</div>
+<div class="divider"></div>
+<div class="pane">
+<div class="label">运行输出</div>
+<div id="output">点击『运行』执行左侧代码...</div>
+</div>
+</div>
+<footer>PyLite Compiler · 代码补全仅作提示不限制输入 · 编译+链接+运行在服务端沙箱完成</footer>
+<div id="docPanel">
+<div class="doc-head">
+<h2>PyLite 内置函数与模块操作全览</h2>
+<button class="doc-close" id="docClose">关闭</button>
+</div>
+<div class="doc-body" id="docBody"></div>
+</div>
+<script>
+const KEYWORDS = ["def","return","if","elif","else","for","while","in","not","and","or","break","continue","pass","True","False","None","import","from","as","global","del","is","lambda","class","try","except","finally","raise","with","yield"];
+const BUILTINS = [
+  ["print(a, b, ...)", "输出到控制台，空格分隔，末尾换行"],
+  ["len(x)", "字符串/列表/字典/元组的长度"],
+  ["range(stop) / range(start, stop[, step])", "整数序列，只能直接用在 for 的迭代位置"],
+  ["str(x)", "转为字符串"],
+  ["int(x)", "转为整数"],
+  ["float(x)", "转为浮点数"],
+  ["abs(x)", "绝对值"],
+  ["max(a, b, ...)", "最大值"],
+  ["min(a, b, ...)", "最小值"],
+  ["sum(iterable)", "求和"],
+  ["input([prompt])", "从标准输入读取一行"],
+  ["type(x)", "返回类型"],
+  ["hasattr(obj, name)", "判断对象是否有指定属性"],
+  ["sleep_ms(ms)", "休眠指定毫秒数"],
+  ["sorted(iterable)", "排序返回新列表"],
+  ["reversed(iterable)", "反转序列"],
+  ["enumerate(iterable)", "带索引遍历"]
+];
+const STR_METHODS = ["upper","lower","strip","split","join","startswith","endswith","replace","find","count"];
+const LIST_METHODS = ["append","extend","insert","remove","pop","index","count","reverse","sort","clear"];
+const MODULES = {
+  docker: { desc: "Docker 容器管理", fns: [
+    ["run(image, cmd)", "运行容器；image 字符串(镜像名)，cmd 字符串(启动命令)"],["ps()", "列出全部容器"],["stop(containerId)", "停止指定容器；containerId 字符串"],["logs(containerId)", "查看容器日志；containerId 字符串"],["pull(image)", "拉取镜像；image 字符串"],["generate_dockerfile(baseImage, projectName, setupCommands, entrypoint, exposePort)", "生成 Dockerfile；baseImage/projectName/entrypoint 字符串，setupCommands 字符串(安装命令，多行)，exposePort 整数(端口)"],["build(dockerfile, imageName, tag, contextDir)", "构建镜像；四个参数均为字符串(dockerfile 路径、镜像名、标签、上下文目录)"],["push(imageName, tag, registry)", "推送镜像；三个参数均为字符串"],["project_package(projectDir, imageName, tag, baseImage, setupCommands, entrypoint, exposePort)", "项目整体打包；exposePort 整数，其余字符串"]
+  ]},
+  llm: { desc: "大语言模型与微调", fns: [
+    ["chat(prompt, systemPrompt, model, apiKey, endpoint)", "对话调用；五个参数均为字符串，endpoint 形如 http://host:port/v1"],["create_network(name, layers)", "创建网络；name 字符串，layers 列表(每层为字典定义)"],["add_layer(network, layer)", "添加层；network 字符串(网络句柄)，layer 字典"],["remove_layer(network, index)", "删除层；index 整数"],["network_summary(network)", "网络结构摘要；network 字符串"],["create_dataset(examples, systemPrompt)", "创建数据集；examples 列表，systemPrompt 字符串"],["upload_file(data, filename, apiKey, endpoint)", "上传文件；data 字符串(文件内容)，其余字符串"],["create_finetune(fileId, model, suffix, apiKey, endpoint)", "创建微调任务；五个参数均为字符串"],["finetune_status(jobId, apiKey, endpoint)", "查询微调状态；均为字符串"],["list_finetunes(apiKey, endpoint)", "列出微调任务；均为字符串"]
+  ]},
+  cuda: { desc: "CUDA GPU 计算", fns: [
+    ["info()", "查询 GPU 信息"],["compile_ptx(kernelCode, kernelName)", "编译内核；两个参数均为字符串"],["launch_kernel(ptxCode, kernelName, gridX, gridY, gridZ, blockX, blockY, blockZ)", "启动内核；前两个字符串，后六个为整数(网格/线程块三维尺寸，常用 1 起)"],["alloc(size)", "分配显存；size 整数(字节)"],["free(handle)", "释放显存；handle 整数(句柄)"],["memcpy_to_device(handle, data)", "复制到设备；handle 整数，data 字符串或列表"],["memcpy_from_device(handle, size)", "复制回主机；handle 整数，size 整数(字节)"]
+  ]},
+  fusion: { desc: "算子融合优化", fns: [
+    ["create_graph(name)", "创建计算图；name 字符串"],["add_op(graph, opType, opName, params)", "添加算子；前三个字符串，params 字典或字符串"],["apply_rules(graph)", "应用融合规则；graph 字符串"],["generate_kernel(fusedOp, config)", "生成内核；两个参数均为字符串"],["autotune(opType, M, N, K)", "自动调优；opType 字符串，M/N/K 整数(矩阵维度)"],["compile_and_run(kernelCode, kernelName, M, N, K)", "编译运行；前两个字符串，后三个整数"],["benchmark(kernelCode, kernelName, M, N, K, iterations)", "基准测试；前两个字符串，后四个整数(iterations 为迭代次数)"]
+  ]},
+  inference: { desc: "模型推理", fns: [
+    ["load_model(modelPath, configPath)", "加载模型；两个参数均为字符串(文件路径)"],["generate(prompt, maxTokens, temperature, topP, topK)", "生成文本；prompt 字符串，maxTokens 整数(默认 256)，temperature 浮点(默认 0.7)，topP 浮点(默认 0.9)，topK 整数(默认 50)"],["kv_cache_stats()", "KV 缓存统计"],["flash_attention_kernel()", "FlashAttention 内核源码"],["multi_gpu_info()", "多 GPU 信息"],["profile()", "性能分析"],["unload()", "卸载模型"]
+  ]},
+  tokenizer: { desc: "分词器", fns: [
+    ["load(path)", "加载分词器；path 字符串"],["encode(text)", "编码为 token；text 字符串，返回整数列表"],["decode(tokenIds)", "解码为文本；tokenIds 整数列表"],["info()", "分词器信息"]
+  ]},
+  server: { desc: "HTTP 服务", fns: [
+    ["start(port)", "启动服务；port 整数(端口号，默认 8080)"],["stop()", "停止服务"],["status()", "服务状态"],["config(secret, node_id)", "集群配置；两个参数均为字符串"],["tls(cert, key)", "TLS 加密；cert/key 均为字符串(PEM 文件路径)"]
+  ]},
+  quantize: { desc: "模型量化", fns: [
+    ["fp16_to_awq(weightsJson, bits, groupSize)", "FP16 转 AWQ；weightsJson 字符串(权重 JSON)，bits 整数(量化位数，如 4)，groupSize 整数(分组大小，如 128)"],["arch_template(archName)", "架构量化模板；archName 字符串"],["verify_precision(fp16Values, awqValues)", "精度对比；两个参数均为浮点列表"],["model_info(modelPath)", "量化模型信息；modelPath 字符串"]
+  ]},
+  engine: { desc: "推理引擎", fns: [
+    ["init(configJson)", "初始化引擎；configJson 字符串(JSON 配置，可传 {} 使用默认值)"],["add_request(prompt, maxTokens, temperature, topP, topK)", "添加请求；格式同 inference.generate（prompt 字符串，maxTokens/topK 整数，temperature/topP 浮点）"],["step()", "执行一次推理步进"],["status()", "引擎状态"],["reset()", "重置引擎"],["serve(port)", "启动推理服务；port 整数(端口号)"]
+  ]},
+  sandbox: { desc: "沙箱执行环境", fns: [
+    ["create()", "创建沙箱，返回实例句柄"],["set_cpu_limit(inst, ms)", "CPU 时间限制；inst 为 create 返回的实例，ms 整数(毫秒)"],["set_mem_limit(inst, bytes)", "内存限制；bytes 整数(字节)"],["set_max_pids(inst, n)", "最大进程数；n 整数"],["set_work_dir(inst, path)", "工作目录；path 字符串"],["set_binary(inst, path)", "执行程序路径；path 字符串"],["add_arg(inst, arg)", "添加启动参数；arg 字符串"],["set_stdin(inst, path)", "重定向标准输入；path 字符串(文件路径)"],["set_stdout(inst, path)", "重定向标准输出；path 字符串"],["set_stderr(inst, path)", "重定向标准错误；path 字符串"],["exec(inst)", "在沙箱中执行"],["destroy(inst)", "销毁沙箱实例"]
+  ]},
+  raft: { desc: "Raft 分布式共识", fns: [
+    ["build(config_json)", "构建节点；config_json 字符串(JSON，形如 {\"node_id\":\"n1\",\"bind_addr\":\"127.0.0.1:9000\"})"],["erase(node_id)", "删除节点；node_id 字符串"],["status(node_id)", "节点状态；node_id 字符串"],["list_nodes()", "列出全部节点"],["add(node_id, cmd_type, payload)", "追加日志；三个参数均为字符串"],["register_handler(node_id, ...)", "注册消息处理器"],["register_node(node_id, role, addr)", "注册集群节点；role 字符串(\"leader\"/\"follower\")，addr 字符串(\"IP:端口\")"],["cluster_nodes(node_id)", "集群节点列表"],["mount_storage(node_id, name, path)", "挂载存储；三个参数均为字符串"],["plugin_load(node_id, name, so_path)", "加载插件；so_path 字符串(.so 文件路径)"],["plugin_unload(node_id, name)", "卸载插件"],["plugin_list(node_id)", "已加载插件列表"],["leader_info(node_id)", "主节点信息"],["send(node_id, msg)", "发送消息；msg 字符串"],["recv(node_id)", "接收消息"]
+  ]},
+  cluster: { desc: "集群管理", fns: [
+    ["connect(name, addr, secret)", "加入集群；三个参数均为字符串，addr 形如 \"IP:端口\""],["disconnect(name)", "断开集群；name 字符串"],["list()", "列出全部集群"],["is_connected(name)", "是否已连接；返回布尔"],["status(name)", "集群状态"],["nodes(name)", "集群节点列表"],["health(name)", "集群健康检查；返回布尔"],["exec(name, cmd_type, payload)", "集群执行命令；三个参数均为字符串"],["query(name, path)", "集群查询；path 字符串(查询路径)"],["broadcast(cmd_type, payload)", "集群广播；两个参数均为字符串"],["health_all()", "全部集群健康检查"]
+  ]},
+  kv: { desc: "KV 节点与存储", fns: [
+    ["build(node_id, binary, args_json, work_dir, addr)", "构建 KV 节点；五个参数均为字符串，args_json 为 JSON 数组文本（如空数组），addr 形如 \"IP:端口\""],["add(node_id, binary, args_json, work_dir, addr)", "添加节点；格式同 build"],["erase(node_id)", "删除节点"],["skip(node_id)", "跳过节点"],["sleep(node_id)", "休眠节点"],["wakeup(node_id)", "唤醒节点"],["stop(node_id)", "停止节点"],["restart(node_id)", "重启节点"],["status(node_id)", "节点状态"],["list()", "节点列表"],["alive(node_id)", "节点存活检查；返回布尔"],["bind_sandbox(node_id, ...)", "绑定沙箱"],["get_sandbox(node_id)", "获取绑定的沙箱"],["unbind_sandbox(node_id)", "解绑沙箱"],["add_box(node_id, box, addr)", "添加盒子；box 为值对象(任意类型)，addr 字符串"],["locate(box)", "定位盒子所在节点；box 为值对象"],["self()", "当前节点标识(读取环境变量 PYLITE_NODE_ID)"],["iter()", "创建迭代器，返回迭代器对象"],["next(it)", "迭代器前移；it 为 iter() 返回的对象"],["rewind(it)", "重置迭代器"],["iter_destroy(it)", "销毁迭代器"],["iter_live(it)", "迭代器是否有效；返回布尔"]
+  ]}
+};
+const EXAMPLES = {
+  fib: { name: "斐波那契数列（递归函数）", code: `def fib(n):
+    if n < 2:
+        return n
+    return fib(n-1) + fib(n-2)
+
+for i in range(12):
+    print(fib(i))` },
+  loop: { name: "循环与累加", code: `total = 0
+for i in range(1, 101):
+    total += i
+print("1 加到 100 =", total)
+
+i = 5
+while i > 0:
+    print("倒数:", i)
+    i -= 1` },
+  list: { name: "列表操作", code: `nums = [5, 2, 8, 1, 9, 3]
+print("原始:", nums)
+print("长度:", len(nums))
+nums.append(7)
+print("追加后:", nums)
+print("切片:", nums[1:4])
+s = 0
+for x in nums:
+    s += x
+print("求和:", s)` },
+  dict: { name: "字典操作", code: `scores = {"语文": 88, "数学": 95, "英语": 76}
+print("成绩单:", scores)
+print("数学:", scores["数学"])
+scores["物理"] = 82
+total = 0
+for k in scores:
+    total += scores[k]
+    print(k, "=", scores[k])
+print("总分:", total)` },
+  func: { name: "多函数协作", code: `def add(a, b):
+    return a + b
+
+def avg3(a, b, c):
+    return add(add(a, b), c) / 3
+
+def report(name, a, b, c):
+    print(name, "三科平均:", avg3(a, b, c))
+
+report("小明", 90, 85, 95)
+report("小红", 78, 88, 92)` },
+  dockerbox: { name: "Docker容器+box绑定", code: `# Docker 容器实例 + box 绑定为受管节点
+# 流程：启动容器 → 创建 box → 绑定节点 → 查看容器状态
+# 注意：容器停止(docker.stop)默认等待约10秒，请用文末【清理】示例单独执行
+
+print("=== 1. docker.run 启动容器实例 ===")
+out = docker.run("alpine", "sleep 600")
+lines = out.split("\n")
+cid = lines[len(lines)-1]
+print("容器ID:", cid)
+
+print("")
+print("=== 2. 容器运行状态 ===")
+print(docker.ps())
+
+print("")
+print("=== 3. 创建 box 并绑定为节点 ===")
+box = sandbox.create()
+sandbox.set_binary(box, "/bin/sleep")
+sandbox.add_arg(box, "600")
+r = kv.add_box("docker-node", box, "127.0.0.1:19030")
+print("add_box:", r)
+print("绑定句柄 get_sandbox:", kv.get_sandbox("docker-node"))
+
+print("")
+print("=== 4. 双向定位验证 ===")
+print("locate(box):", kv.locate(box))
+print("节点存活:", kv.alive("docker-node"))
+
+print("")
+print("容器与 box 已就绪。清理请运行【Docker清理】示例")
+` },
+  dockerclean: { name: "Docker清理(停止容器+销毁节点)", code: `# 清理上一个示例创建的资源
+# docker.stop 默认等待容器优雅退出约10秒，属正常现象
+
+print("=== 1. 销毁绑定节点 ===")
+print(kv.erase("docker-node"))
+
+print("")
+print("=== 2. 查看当前容器 ===")
+ps = docker.ps()
+print(ps)
+
+print("")
+print("=== 3. 停止 alpine 容器(约10秒) ===")
+lines = ps.split("\n")
+for line in lines:
+    if "alpine" in line:
+        parts = line.split()
+        print("停止容器:", parts[0])
+        docker.stop(parts[0])
+        print("已停止")
+
+print("")
+print("=== 4. 验证 ===")
+print(docker.ps())
+print("节点列表:", kv.list())
+` },
+  destroy: { name: "销毁节点+映射清理验证", code: `# 销毁操作：kv.erase 永久移除节点，同时清除双向映射
+# （节点->沙箱 与 沙箱->节点 两张映射表中的实例一并清除）
+
+print("=== 1. 创建 box 并注册为节点 ===")
+box = sandbox.create()
+sandbox.set_binary(box, "/bin/sleep")
+sandbox.add_arg(box, "3600")
+r = kv.add_box("del-node", box, "127.0.0.1:19011")
+print("add_box:", r)
+
+print("")
+print("=== 2. 销毁前：双向映射均存在 ===")
+print("get_sandbox(del-node):", kv.get_sandbox("del-node"))
+print("locate(box):", kv.locate(box))
+
+print("")
+print("=== 3. 执行销毁 kv.erase ===")
+er = kv.erase("del-node")
+print("erase:", er)
+
+print("")
+print("=== 4. 销毁后：两张映射表均已清除 ===")
+print("get_sandbox:", kv.get_sandbox("del-node"), "（-1 表示正向映射已清）")
+print("locate:", kv.locate(box), "（found:false 表示反向映射已清）")
+print("alive:", kv.alive("del-node"), "（0 表示节点已终止）")
+print("status:", kv.status("del-node"))
+` },
+  locate2: { name: "节点与box双向定位", code: `# 双向定位：通过 box 找节点(locate)，通过节点找 box(get_sandbox)
+# add_box 注册时会自动建立 节点ID <-> 沙箱句柄 的双向绑定
+
+print("=== 1. 创建 box 并注册为节点 ===")
+box = sandbox.create()
+sandbox.set_binary(box, "/bin/sleep")
+sandbox.add_arg(box, "3600")
+r = kv.add_box("loc-node", box, "127.0.0.1:19004")
+print("add_box:", r)
+
+print("")
+print("=== 2. 正向：通过 box 定位节点 ===")
+print("locate(box):", kv.locate(box))
+
+print("")
+print("=== 3. 反向：通过节点定位 box ===")
+handle = kv.get_sandbox("loc-node")
+print("get_sandbox(loc-node):", handle)
+print("(返回沙箱句柄，与 box 对应；-1 表示未绑定)")
+
+print("")
+print("=== 4. 解绑后的变化 ===")
+kv.unbind_sandbox("loc-node")
+print("unbind 后 get_sandbox:", kv.get_sandbox("loc-node"))
+print("unbind 后 locate:", kv.locate(box))
+
+print("")
+print("=== 5. 清理 ===")
+kv.stop("loc-node")
+print("节点已停止")
+` },
+  boxnode: { name: "添加box注册节点+远程关闭", code: `# 场景：创建沙箱 box → 注册为集群节点 → 查询定位 → 远程关闭节点
+# 说明：box 是 sandbox.create 创建的沙箱实例，add_box 会把沙箱里
+#       配置的程序注册为一个 KV 节点，之后可远程管理其生命周期
+
+print("=== 1. 创建沙箱 box ===")
+box = sandbox.create()
+sandbox.set_binary(box, "/bin/sleep")
+sandbox.add_arg(box, "3600")
+print("box 已创建并配置运行程序: /bin/sleep 3600")
+
+print("")
+print("=== 2. add_box 注册为集群节点 ===")
+r = kv.add_box("demo-node", box, "127.0.0.1:19002")
+print("add_box:", r)
+
+print("")
+print("=== 3. 查看节点列表与存活状态 ===")
+print("list:", kv.list())
+print("alive:", kv.alive("demo-node"))
+
+print("")
+print("=== 4. locate 反向定位 box 所在节点 ===")
+print("locate:", kv.locate(box))
+
+print("")
+print("=== 5. 远程关闭节点 ===")
+st = kv.stop("demo-node")
+print("stop:", st)
+print("关闭后 alive:", kv.alive("demo-node"))
+print("关闭后 status:", kv.status("demo-node"))
+` },
+  cluster: { name: "集群连接测试（三节点）", code: `# 三节点集群连接测试
+# 节点服务监听 TLS 加密通道，集群连接走 HTTP
+# 注意：跨机连接需目标节点已启动且端口放行
+
+SECRET = "pylite-cluster-2026"
+
+# 1. 连接本机节点（回环地址，安全组不拦截）
+print("=== 连接本机节点 alytun ===")
+r1 = cluster.connect("alytun", "127.0.0.1:9000", SECRET)
+print("connect:", r1)
+print("connected:", cluster.is_connected("alytun"))
+
+# 2. 查看集群状态
+print("")
+print("=== 集群状态 ===")
+st = cluster.status("alytun")
+print("status:", st)
+
+# 3. 列出全部集群
+print("")
+print("=== 集群列表 ===")
+clusters = cluster.list()
+print("list:", clusters)
+
+# 4. 健康检查
+print("")
+print("=== 健康检查 ===")
+print("health:", cluster.health("alytun"))
+` },
+  raft: { name: "Raft 共识示例", code: `cfg = "{\"node_id\":\"node1\",\"bind_addr\":\"127.0.0.1:9000\"}"
+node = raft.build(cfg)
+print("build:", node)
+st = raft.status("node1")
+print("status:", st)` }
+};
+
+const editor = document.getElementById("editor");
+const output = document.getElementById("output");
+const statusEl = document.getElementById("status");
+const sel = document.getElementById("examples");
+const runBtn = document.getElementById("runBtn");
+const clearBtn = document.getElementById("clearBtn");
+const docBtn = document.getElementById("docBtn");
+const docPanel = document.getElementById("docPanel");
+const docClose = document.getElementById("docClose");
+const docBody = document.getElementById("docBody");
+const suggest = document.getElementById("suggest");
+
+for (const [key, ex] of Object.entries(EXAMPLES)) {
+  const opt = document.createElement("option");
+  opt.value = key;
+  opt.textContent = ex.name;
+  sel.appendChild(opt);
+}
+function loadExample() { editor.value = EXAMPLES[sel.value].code; }
+sel.addEventListener("change", loadExample);
+loadExample();
+
+let sugItems = [];
+let sugIndex = -1;
+let sugStart = 0;
+
+function currentToken() {
+  const pos = editor.selectionStart;
+  const text = editor.value.slice(0, pos);
+  const m = text.match(/([A-Za-z_][A-Za-z0-9_]*)(\.[A-Za-z0-9_]*)?$/);
+  if (!m) return null;
+  return { word: m[1], dot: m[2] || null, start: pos - m[0].length };
+}
+
+function buildItems() {
+  const t = currentToken();
+  if (!t) return null;
+  let items = [];
+  if (t.dot !== null) {
+    const mod = MODULES[t.word];
+    if (!mod) return null;
+    const frag = t.dot.slice(1).toLowerCase();
+    for (const [sig, desc] of mod.fns) {
+      const name = sig.split("(")[0];
+      if (!frag || name.toLowerCase().startsWith(frag)) items.push({ label: t.word + "." + sig, insert: name, kind: "模块函数", sig: desc });
+    }
+  } else {
+    const frag = t.word.toLowerCase();
+    if (!frag) return null;
+    for (const kw of KEYWORDS) if (kw.toLowerCase().startsWith(frag)) items.push({ label: kw, insert: kw, kind: "关键字", sig: "" });
+    for (const [sig, desc] of BUILTINS) {
+      const name = sig.split("(")[0];
+      if (name.toLowerCase().startsWith(frag)) items.push({ label: sig, insert: name, kind: "内置函数", sig: desc });
+    }
+    for (const mname of Object.keys(MODULES)) if (mname.toLowerCase().startsWith(frag)) items.push({ label: mname, insert: mname, kind: "模块", sig: MODULES[mname].desc });
+    for (const m of STR_METHODS) if (m.startsWith(frag)) items.push({ label: m + "()", insert: m, kind: "字符串方法", sig: "" });
+    for (const m of LIST_METHODS) if (m.startsWith(frag)) items.push({ label: m + "()", insert: m, kind: "列表方法", sig: "" });
+  }
+  if (!items.length) return null;
+  return { items: items.slice(0, 12), start: t.start, token: t };
+}
+
+function hideSuggest() { suggest.style.display = "none"; sugItems = []; sugIndex = -1; }
+
+function renderSuggest(data) {
+  sugItems = data.items;
+  sugStart = data.start;
+  sugIndex = 0;
+  suggest.innerHTML = "";
+  data.items.forEach((it, i) => {
+    const d = document.createElement("div");
+    d.className = "item" + (i === 0 ? " sel" : "");
+    d.innerHTML = "<span>" + it.label + "</span>" + (it.sig ? "<span class=\"sig\">" + it.sig + "</span>" : "") + "<span class=\"kind\">" + it.kind + "</span>";
+    d.addEventListener("mousedown", (e) => { e.preventDefault(); applySuggest(i); });
+    suggest.appendChild(d);
+  });
+  const pos = editor.selectionStart;
+  const before = editor.value.slice(0, pos);
+  const lines = before.split("\n");
+  const row = lines.length - 1;
+  const col = lines[lines.length - 1].length;
+  const lineH = 22.4;
+  const charW = 8.4;
+  suggest.style.left = Math.min(28 + col * charW, editor.clientWidth - 240) + "px";
+  suggest.style.top = Math.min(14 + (row + 1) * lineH - editor.scrollTop, editor.clientHeight - 60) + "px";
+  suggest.style.display = "block";
+}
+
+function applySuggest(i) {
+  if (i < 0 || i >= sugItems.length) return;
+  const t = currentToken();
+  if (!t) { hideSuggest(); return; }
+  const it = sugItems[i];
+  const pos = editor.selectionStart;
+  let replaceFrom = t.start;
+  if (t.dot !== null) replaceFrom = pos - t.dot.slice(1).length;
+  editor.value = editor.value.slice(0, replaceFrom) + it.insert + editor.value.slice(pos);
+  editor.selectionStart = editor.selectionEnd = replaceFrom + it.insert.length;
+  hideSuggest();
+  editor.focus();
+}
+
+editor.addEventListener("input", () => {
+  const data = buildItems();
+  if (data) renderSuggest(data); else hideSuggest();
+});
+editor.addEventListener("keydown", (e) => {
+  if (suggest.style.display === "block") {
+    if (e.key === "ArrowDown") { e.preventDefault(); sugIndex = Math.min(sugIndex + 1, sugItems.length - 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); sugIndex = Math.max(sugIndex - 1, 0); }
+    else if (e.key === "Enter" || e.key === "Tab") { if (sugIndex >= 0) { e.preventDefault(); applySuggest(sugIndex); return; } }
+    else if (e.key === "Escape") { hideSuggest(); return; }
+    const nodes = suggest.querySelectorAll(".item");
+    nodes.forEach((n, i) => n.classList.toggle("sel", i === sugIndex));
+    if (e.key === "Enter" || e.key === "Tab") return;
+  }
+  if (e.key === "Tab" && suggest.style.display !== "block") {
+    e.preventDefault();
+    const s = editor.selectionStart;
+    editor.value = editor.value.slice(0, s) + "    " + editor.value.slice(s);
+    editor.selectionStart = editor.selectionEnd = s + 4;
+  }
+});
+editor.addEventListener("blur", () => setTimeout(hideSuggest, 150));
+editor.addEventListener("scroll", hideSuggest);
+
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+function renderDoc() {
+  let h = "";
+  h += "<div class=\"doc-note\">以下清单来自编译器的真实定义，补全提示与此一致。模块函数以 <b>模块.函数(...)</b> 形式调用；容器方法（如 <b>x.append(v)</b>）运行时按类型分派。</div>";
+  h += "<div class=\"doc-sec\"><h3>全局内置函数</h3>";
+  for (const [sig, desc] of BUILTINS) h += "<div class=\"doc-fn\">" + esc(sig) + " <span class=\"fndesc\">—— " + esc(desc) + "</span></div>";
+  h += "<div class=\"doc-fn\">x." + STR_METHODS.join(" / x.") + " <span class=\"fndesc\">—— 字符串方法</span></div>";
+  h += "<div class=\"doc-fn\">lst." + LIST_METHODS.join(" / lst.") + " <span class=\"fndesc\">—— 列表方法</span></div>";
+  h += "</div>";
+  for (const [mname, mod] of Object.entries(MODULES)) {
+    h += "<div class=\"doc-mod\"><h3>" + esc(mname) + " <span style=\"color:#8b949e;font-size:12px\">—— " + esc(mod.desc) + "</span></h3>";
+    for (const [sig, desc] of mod.fns) h += "<div class=\"doc-fn\">" + esc(mname + "." + sig) + " <span class=\"fndesc\">—— " + esc(desc) + "</span></div>";
+    h += "</div>";
+  }
+  docBody.innerHTML = h;
+}
+renderDoc();
+
+docBtn.addEventListener("click", () => docPanel.classList.toggle("open"));
+docClose.addEventListener("click", () => docPanel.classList.remove("open"));
+
+runBtn.addEventListener("click", async () => {
+  runBtn.disabled = true;
+  statusEl.textContent = "编译运行中...";
+  output.innerHTML = "<span style='color:#8b949e'>正在提交到服务端编译执行，请稍候...</span>";
+  try {
+    const resp = await fetch("/pylite_run/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: editor.value })
+    });
+    const r = await resp.json();
+    let html = "";
+    if (r.stage && r.stage !== "run") html += "<span style='color:#f85149'>[" + esc(r.stage) + " 阶段]</span>\n";
+    html += esc(r.output || "（无输出）");
+    if (r.elapsed_ms !== undefined) html += "\n<span style='color:#8b949e'>--- 耗时 " + r.elapsed_ms + " ms，退出码 " + r.exit_code + " ---</span>";
+    output.innerHTML = html;
+    statusEl.textContent = r.ok ? "运行成功" : "执行完成（有错误）";
+  } catch (e) {
+    output.innerHTML = "<span style='color:#f85149'>请求失败: " + esc(String(e)) + "</span>";
+    statusEl.textContent = "请求失败";
+  }
+  runBtn.disabled = false;
+});
+clearBtn.addEventListener("click", () => { output.innerHTML = "<span style='color:#8b949e'>输出已清空</span>"; statusEl.textContent = "就绪"; });
+</script>
+</body>
+</html>
