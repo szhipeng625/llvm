@@ -1,0 +1,34 @@
+# cluster_manage.pys — Docker / MySQL / MQ / MID 统一纳管到 PyLite 分布式节点
+# 作用: 把容器化组件注册为受管节点, 由分布式管理面统一调度、健康探测、故障重启
+# 运行: cat mount_protocol.pys cluster_manage.pys > app.pys && pylitec app.pys -o app.o -I app
+
+print("=== PyLite 分布式组件纳管 ===")
+
+print("接入协调服务:", kv.persist("43.157.39.171:6380"))
+
+print("--- 注册 Docker 运行时 ---")
+print(kv.add("docker-runtime", "/usr/bin/docker", "[\"info\"]", "/home/ubuntu", "127.0.0.1:2375"))
+
+print("--- 注册 MySQL 数据库 ---")
+print(kv.add("svc-mysql", "/usr/bin/docker", "[\"exec\",\"vh-mysql\",\"mysqladmin\",\"ping\",\"-h\",\"localhost\"]", "/home/ubuntu", "127.0.0.1:3307"))
+
+print("--- 注册 MQ 消息队列 ---")
+print(kv.add("svc-mq", "/usr/bin/docker", "[\"exec\",\"vh-redis\",\"redis-cli\",\"ping\"]", "/home/ubuntu", "127.0.0.1:6379"))
+
+print("--- 注册 MID 消息中间件 ---")
+print(kv.add("svc-mid", "/usr/bin/docker", "[\"exec\",\"vh-api-gateway\",\"curl\",\"-f\",\"http://localhost:8000/health\"]", "/home/ubuntu", "127.0.0.1:8000"))
+
+print("--- 纳管节点清单 ---")
+print(kv.list())
+
+print("--- 逐项状态探测 ---")
+print("docker-runtime alive:", kv.alive("docker-runtime"))
+print(kv.status("docker-runtime"))
+print("svc-mysql alive:", kv.alive("svc-mysql"))
+print(kv.status("svc-mysql"))
+print("svc-mq alive:", kv.alive("svc-mq"))
+print(kv.status("svc-mq"))
+print("svc-mid alive:", kv.alive("svc-mid"))
+print(kv.status("svc-mid"))
+
+print("=== 四类组件纳管完成 ===")

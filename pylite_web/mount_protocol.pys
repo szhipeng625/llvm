@@ -172,6 +172,82 @@ def mp_judge_op(h, op, arg):
                     else:
                         return mp_err("cloud_judge: unsupported op " + op)
 
+# ============================================================
+#  mq 消息队列后端适配
+#  桥接函数 mp_mq_bridge 是唯一后端通道, 生产环境替换为真实消息队列连接
+# ============================================================
+def mp_mq_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "WRITE":
+        return "published, channel=" + cfg.get("channel", "task")
+    else:
+        if op == "EXEC":
+            return "published, channel=" + cfg.get("channel", "task")
+        else:
+            if op == "READ":
+                return "consumed: task message"
+            else:
+                if op == "LIST":
+                    return "channels: task, result, event"
+                else:
+                    return "mq alive, broker=" + cfg.get("broker", "vh-redis:6379")
+
+def mp_mq_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_mq_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_mq_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_mq_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_mq_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_mq_bridge(h, op, arg))
+                    else:
+                        return mp_err("mq: unsupported op " + op)
+
+# ============================================================
+#  mid 消息中间件后端适配
+#  桥接函数 mp_mid_bridge 是唯一后端通道, 生产环境替换为真实网关连接
+# ============================================================
+def mp_mid_bridge(h, op, arg):
+    cfg = h.get("config", {})
+    if op == "WRITE":
+        return "request forwarded, endpoint=" + cfg.get("endpoint", "?")
+    else:
+        if op == "EXEC":
+            return "request forwarded, endpoint=" + cfg.get("endpoint", "?")
+        else:
+            if op == "READ":
+                return "response: 200 OK"
+            else:
+                if op == "LIST":
+                    return "routes: /api/user, /api/chat, /api/doc"
+                else:
+                    return "mid alive, endpoint=" + cfg.get("endpoint", "?") + ", consul=" + cfg.get("consul", "?")
+
+def mp_mid_op(h, op, arg):
+    if op == "READ":
+        return mp_ok(mp_mid_bridge(h, op, arg))
+    else:
+        if op == "WRITE":
+            return mp_ok(mp_mid_bridge(h, op, arg))
+        else:
+            if op == "EXEC":
+                return mp_ok(mp_mid_bridge(h, op, arg))
+            else:
+                if op == "LIST":
+                    return mp_ok(mp_mid_bridge(h, op, arg))
+                else:
+                    if op == "STATUS":
+                        return mp_ok(mp_mid_bridge(h, op, arg))
+                    else:
+                        return mp_err("mid: unsupported op " + op)
+
 # ---------- 5. 挂载与卸载(注册表通过参数传入) ----------
 def mp_mount(mounts, name, backend, config):
     h = {"name": name, "backend": backend, "config": config, "state": "mounted"}
@@ -213,4 +289,10 @@ def mp_call(mounts, name, op, arg):
                 if b == "cloud_judge":
                     return mp_judge_op(h, op, arg)
                 else:
-                    return mp_err("unknown backend: " + b)
+                    if b == "mq":
+                        return mp_mq_op(h, op, arg)
+                    else:
+                        if b == "mid":
+                            return mp_mid_op(h, op, arg)
+                        else:
+                            return mp_err("unknown backend: " + b)
