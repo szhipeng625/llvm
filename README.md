@@ -228,6 +228,7 @@ cd build && ctest --output-on-failure
 - 比较不支持 Python 的链式写法(`a < b < c`)
 - `a[i] += 1` 这类复合赋值尚未支持(`a[i] = ...` 支持)
 - 整数是 64 位,不会自动提升为任意精度
-- 没有类、异常、`import`、生成器、推导式、JIT REPL
+- 支持类（`class`）：单继承、`__init__`、属性读写、方法调用，实例属性表复用字典实现
+- 没有异常、`import`、生成器、推导式、JIT REPL
 
 完整的支持清单与语义细节见 [docs/language.md](docs/language.md)。
